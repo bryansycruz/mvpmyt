@@ -1,0 +1,34 @@
+# Credenciales — NUNCA subir a Git
+.streamlit/secrets.toml
+.env
+api_key.txt
+
+# Datos de prueba en modo local
+datos_mamposteria_local.xlsx
+
+# Documentación interna de obra (no se publica en el repo)
+README_DESPERDICIO.md
+docs/context.txt
+docs/problem_Adm.txt
+
+# Configuración local de herramientas
+.claude/
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Archivos temporales de Office
+~$*
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,1378 @@
+"""
+app.py — Control de Mampostería · Serrania Campestre
+────────────────────────────────────────────────────
+App Streamlit para registrar diariamente el trabajo de mampostería por oficial,
+calcular indicadores y persistir el histórico en la nube.
+
+El almacenamiento se elige automáticamente (ver data_backend.py):
+    Supabase  →  SharePoint  →  Excel local (demo)
+"""
+
+import io
+from datetime import datetime
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+from data_backend import (
+    leer_datos, agregar_registros, estado,
+    leer_config, guardar_config, config_persistente,
+    leer_salidas, agregar_salidas, leer_catalogo, guardar_catalogo,
+)
+from data_schema import COLUMNAS_SALIDAS
+from calculos import (
+    TEORICO_SAC_M2, KG_POR_SACO,
+    UMBRAL_DESPERDICIO_PCT, FACTOR_AJUSTE_BLOQUES,
+    consumo_ratio, consumo_por, resumen_por,
+    construir_filas_grupo, cumple_meta,
+    bloques_teoricos_muro, conciliacion,
+)
+import auth_supabase as auth
+
+# ─────────────────────────────────────────────────────────────
+# Constantes de presentación
+# ─────────────────────────────────────────────────────────────
+# Valor por defecto del nombre de proyecto. La meta y los kg/saco usan las
+# constantes de `calculos`. Todos pueden sobrescribirse desde la configuración
+# editable (ver _meta()/_kg()/_proyecto() y el panel de admin en el sidebar).
+PROYECTO = "Serrania Campestre"
+
+
+# ─────────────────────────────────────────────────────────────
+# Configuración editable (meta, kg/saco, proyecto)
+# ─────────────────────────────────────────────────────────────
+@st.cache_data(ttl=60, show_spinner=False)
+def cargar_config_cached() -> dict:
+    return leer_config()
+
+
+def _cfg() -> dict:
+    """Configuración activa de la sesión (cargada en main, defectos si falta)."""
+    return st.session_state.get("cfg", {})
+
+
+def _meta() -> float:
+    return float(_cfg().get("meta_sac_m2", TEORICO_SAC_M2))
+
+
+def _kg() -> float:
+    return float(_cfg().get("kg_por_saco", KG_POR_SACO))
+
+
+def _proyecto() -> str:
+    return _cfg().get("proyecto", PROYECTO)
+
+
+def _umbral_pct() -> float:
+    """Umbral del semáforo de desperdicio de bloques (%)."""
+    return float(_cfg().get("umbral_desperdicio_pct", UMBRAL_DESPERDICIO_PCT))
+
+
+def _factor_ajuste() -> float:
+    """Factor que multiplica el teórico en la conciliación (cortes/trabas)."""
+    return float(_cfg().get("factor_ajuste_bloques", FACTOR_AJUSTE_BLOQUES))
+
+st.set_page_config(page_title="Control de Mampostería", page_icon="🧱", layout="wide")
+
+
+# ─────────────────────────────────────────────────────────────
+# Carga de datos (con caché de 60 s)
+# ─────────────────────────────────────────────────────────────
+@st.cache_data(ttl=60, show_spinner="Cargando datos…")
+def cargar_datos_cached() -> pd.DataFrame:
+    return leer_datos()
+
+
+@st.cache_data(ttl=60, show_spinner="Cargando salidas de almacén…")
+def cargar_salidas_cached() -> pd.DataFrame:
+    return leer_salidas()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cargar_catalogo_cached() -> list:
+    return leer_catalogo()
+
+
+def cargar_datos_estado():
+    """Carga los datos y reporta el estado REAL de la conexión.
+
+    Devuelve (df, conectado, detalle_error). NO detiene la app: deja que el
+    sidebar muestre el estado y que `main` decida cómo seguir.
+    """
+    try:
+        return cargar_datos_cached(), True, ""
+    except Exception as e:
+        return None, False, str(e)
+
+
+# ─────────────────────────────────────────────────────────────
+# Utilidades
+# ─────────────────────────────────────────────────────────────
+def opciones_unicas(df: pd.DataFrame, columna: str) -> list:
+    """Valores únicos no nulos de una columna, ordenados — para autocompletado."""
+    if df.empty or columna not in df.columns:
+        return []
+    return sorted(df[columna].dropna().astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist())
+
+
+def campo_con_nuevo(label: str, opciones: list, key: str, opcional: bool = False) -> str:
+    """
+    Selectbox con opción de escribir un valor nuevo (manejo de oficiales,
+    ayudantes, pisos y ladrillos irregulares, sin lista fija).
+    Si `opcional`, agrega la opción "— Ninguno —" (por defecto) y puede devolver "".
+    """
+    NUEVO = "➕ Escribir nuevo…"
+    NINGUNO = "— Ninguno —"
+    base = ([NINGUNO] if opcional else []) + [NUEVO] + opciones
+    seleccion = st.selectbox(label, base, key=f"sel_{key}")
+    if seleccion == NINGUNO:
+        return ""
+    if seleccion == NUEVO:
+        return st.text_input(f"Nuevo valor — {label}", key=f"new_{key}").strip()
+    return seleccion
+
+
+def color_consumo(val):
+    """Rojo si supera la meta, verde si la cumple."""
+    if pd.isna(val):
+        return ""
+    if val > _meta():
+        return "color: #c0392b; font-weight: bold;"
+    return "color: #1e8449; font-weight: bold;"
+
+
+def estilar_consumo(styler, columna="Consumo_real_sac_m2"):
+    """Aplica color condicional, compatible con pandas <2.1 (applymap) y >=2.1 (map)."""
+    try:
+        return styler.map(color_consumo, subset=[columna])
+    except AttributeError:
+        return styler.applymap(color_consumo, subset=[columna])
+
+
+def color_desperdicio(val):
+    """Semáforo del desperdicio de bloques (val en fracción: 0.10 = 10%):
+    verde ≤ umbral, naranja ≤ 1.5×umbral, rojo por encima."""
+    if pd.isna(val):
+        return ""
+    pct = val * 100
+    umbral = _umbral_pct()
+    if pct <= umbral:
+        return "color: #1e8449; font-weight: bold;"
+    if pct <= 1.5 * umbral:
+        return "color: #d68910; font-weight: bold;"
+    return "color: #c0392b; font-weight: bold;"
+
+
+def estilar_desperdicio(styler, columna="Desperdicio_pct"):
+    """Semáforo en la tabla de conciliación (mismo patrón que estilar_consumo)."""
+    try:
+        return styler.map(color_desperdicio, subset=[columna])
+    except AttributeError:
+        return styler.applymap(color_desperdicio, subset=[columna])
+
+
+# ── Catálogo de bloques en sesión (cargado en main) ─────────
+def _catalogo() -> list:
+    """Catálogo de bloques activo de la sesión (lista de dicts)."""
+    return st.session_state.get("catalogo") or []
+
+
+def _bloques_clase(clase: str) -> list:
+    return [b for b in _catalogo() if b.get("clase") == clase]
+
+
+def _bloque_por_nombre(nombre: str):
+    return next((b for b in _catalogo() if b.get("nombre") == nombre), None)
+
+
+def estado_presencia(dias_sin_venir: int) -> str:
+    """Clasifica al oficial por días sin registrar trabajo."""
+    if dias_sin_venir >= 30:
+        return "Inactivo"
+    if dias_sin_venir >= 7:
+        return "En pausa"
+    return "Activo"
+
+
+def preparar_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Copia para mostrar: Fecha como texto y Cumple_meta como ✓/✗."""
+    out = df.copy()
+    if "Fecha" in out:
+        out["Fecha"] = pd.to_datetime(out["Fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if "Cumple_meta" in out:
+        out["Cumple_meta"] = out["Cumple_meta"].map(lambda v: "✓ SÍ" if bool(v) else "✗ NO")
+    return out
+
+
+def excel_bytes(df: pd.DataFrame) -> bytes:
+    """Excel de una sola hoja (`Registros`)."""
+    return excel_libro({"Registros": df})
+
+
+def _sin_timezone(df: pd.DataFrame) -> pd.DataFrame:
+    """Excel (openpyxl) NO soporta datetimes con zona horaria. Convierte las
+    columnas tz-aware (p.ej. `Timestamp_registro`, que en Supabase es timestamptz)
+    a datetimes 'naïve' para poder exportar sin error."""
+    df = df.copy()
+    for col in df.columns:
+        if isinstance(df[col].dtype, pd.DatetimeTZDtype):
+            df[col] = df[col].dt.tz_localize(None)
+    return df
+
+
+def excel_libro(hojas: dict) -> bytes:
+    """Crea un Excel con varias hojas: {nombre_hoja: DataFrame}."""
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for nombre, datos in hojas.items():
+            _sin_timezone(datos).to_excel(writer, index=False, sheet_name=nombre[:31])  # 31 = límite Excel
+    buffer.seek(0)
+    return buffer.read()
+
+
+def excel_datos_y_resumen(df: pd.DataFrame) -> bytes:
+    """Excel con 2 hojas: 'Registros' (datos crudos) + 'Resumen_por_oficial'
+    (m², consumo y % cumple ya calculados), listo para tablas dinámicas/gráficas."""
+    hojas = {"Registros": df}
+    if not df.empty:
+        hojas["Resumen_por_oficial"] = resumen_por(df, "Oficial")
+    return excel_libro(hojas)
+
+
+# ─────────────────────────────────────────────────────────────
+# Barra KPI global (visible en todas las pantallas)
+# ─────────────────────────────────────────────────────────────
+def barra_kpi_global(df: pd.DataFrame):
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Registros totales", len(df))
+
+    total_m2 = df["M2_ejecutados"].sum() if not df.empty else 0.0
+    col2.metric("Total M²", f"{total_m2:,.1f} m²")
+
+    prom = consumo_ratio(df) if not df.empty else float("nan")
+    if pd.notna(prom):
+        col3.metric(
+            "Consumo promedio",
+            f"{prom:.3f}",
+            delta=f"{prom - _meta():+.3f} vs meta",
+            delta_color="inverse",  # menor consumo es mejor
+        )
+        col3.caption(f"= {prom * _kg():.1f} kg/m²")
+    else:
+        col3.metric("Consumo promedio", "—")
+
+    if not df.empty:
+        col4.metric("Cumple meta", f"{df['Cumple_meta'].mean() * 100:.0f}%")
+    else:
+        col4.metric("Cumple meta", "—")
+
+    st.divider()
+
+
+# ─────────────────────────────────────────────────────────────
+# Pantalla 1 — Ingreso de datos
+# ─────────────────────────────────────────────────────────────
+def pagina_ingreso(df: pd.DataFrame):
+    st.header("📋 Ingreso de datos")
+
+    # Mensaje flash tras un guardado exitoso.
+    if "flash" in st.session_state:
+        st.success(st.session_state.pop("flash"))
+
+    # "Versión" del formulario: las keys de TODOS los widgets llevan este número.
+    # Al guardar se incrementa → todos los widgets nacen de nuevo, limpios.
+    # (Borrar las keys de session_state NO basta: st.data_editor conserva su
+    # estado en el navegador y la tabla de muros quedaba con los datos viejos.)
+    n = st.session_state.setdefault("ingreso_nonce", 0)
+
+    oficiales = opciones_unicas(df, "Oficial")
+    ayudantes = opciones_unicas(df, "Ayudante")
+    pisos = opciones_unicas(df, "Piso")
+    ladrillos = opciones_unicas(df, "Tipo_ladrillo")
+    OTRO_SECTOR = "➕ Otro sector…"
+    sectores = ["Torre", "Plataforma"] + [
+        s for s in opciones_unicas(df, "Sector") if s not in ("Torre", "Plataforma")
+    ] + [OTRO_SECTOR]
+
+    # Fila 1 — Identificación
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        fecha = st.date_input("Fecha *", value=datetime.now().date(), key=f"in_fecha_{n}")
+    with c2:
+        sector_sel = st.selectbox("Sector *", sectores, key=f"in_sector_{n}")
+        sector = (
+            st.text_input("Nuevo sector", key=f"in_sector_nuevo_{n}",
+                          placeholder="Ej: Sótano, Casino").strip()
+            if sector_sel == OTRO_SECTOR else sector_sel
+        )
+    with c3:
+        piso = campo_con_nuevo("Piso *", pisos, f"piso_{n}")
+
+    # Fila 2 — Cuadrilla (oficial + ayudante opcional)
+    c4, c5 = st.columns(2)
+    with c4:
+        oficial = campo_con_nuevo("Oficial *", oficiales, f"oficial_{n}")
+    with c5:
+        ayudante = campo_con_nuevo("Ayudante (opcional)", ayudantes, f"ayudante_{n}",
+                                   opcional=True)
+
+    # Fila 3 — Ubicación y tipos de bloque (estructural P.V. + divisorio P.H.)
+    cat_pv = _bloques_clase("PV")
+    cat_ph = _bloques_clase("PH")
+    NINGUNO_PH = "— Ninguno —"
+    c6, c7, c8 = st.columns([2, 1, 1])
+    with c6:
+        zona = st.text_input("Zona / Ubicación", placeholder="Ej: ÚTIL 055, CIERRE RAMPA EJE 9",
+                             key=f"in_zona_{n}")
+    with c7:
+        if cat_pv:
+            tipo_ladrillo = st.selectbox(
+                "Bloque estructural (P.V.) *", [b["nombre"] for b in cat_pv],
+                key=f"sel_ladrillo_pv_{n}",
+                help="Bloque de perforación vertical: el de las columnas de dovela.",
+            )
+        else:
+            # Sin catálogo: texto libre como antes (sin bloques teóricos).
+            tipo_ladrillo = campo_con_nuevo("Tipo de ladrillo", ladrillos, f"ladrillo_{n}")
+    with c8:
+        tipo_ph = ""
+        if cat_ph:
+            sel_ph = st.selectbox(
+                "Bloque divisorio (P.H.)", [NINGUNO_PH] + [b["nombre"] for b in cat_ph],
+                key=f"sel_ladrillo_ph_{n}",
+                help="Elígelo si el muro lleva bloque de perforación horizontal además "
+                     "del P.V. (muro mixto). En — Ninguno —, el muro se calcula 100% P.V.",
+            )
+            tipo_ph = "" if sel_ph == NINGUNO_PH else sel_ph
+
+    # Sección: muros del registro (uno o varios que comparten el total de sacos)
+    st.subheader("Muros y materiales")
+    st.caption(
+        "Agrega **una fila por muro**. El **# de sacos es el TOTAL para todos los "
+        "muros** de la tabla (no por muro): el consumo se calcula como "
+        "sacos ÷ m² del conjunto, tal como la celda combinada en Excel."
+    )
+
+    muros_init = pd.DataFrame([{"Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0, "Uso": "Auto"}])
+    editado = st.data_editor(
+        muros_init,
+        num_rows="dynamic",
+        key=f"muros_editor_{n}",
+        width="stretch",
+        column_config={
+            "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
+            "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
+            "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
+            "Uso": st.column_config.SelectboxColumn(
+                "Uso bloque", options=["Auto", "P.V.", "P.H."], default="Auto",
+                help="Auto: P.V. en las columnas de dovela y P.H. en el resto (si elegiste "
+                     "divisorio). Fuerza P.V. o P.H. para muros 100% de un solo tipo.",
+            ),
+        },
+    )
+
+    s1, s2 = st.columns([1, 3])
+    with s1:
+        sacos_total = st.number_input(
+            "# Sacos (TOTAL del grupo)", min_value=0.0, step=0.5, format="%.1f",
+            key=f"in_sacos_{n}"
+        )
+    with s2:
+        observaciones = st.text_input("Observaciones", key=f"in_obs_{n}")
+
+    # Muros válidos (Largo y Alto > 0)
+    muros = [
+        {"Largo_m": float(r.Largo_m), "Alto_m": float(r.Alto_m),
+         "Num_dovelas": int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0,
+         "Uso": str(r.Uso) if pd.notna(getattr(r, "Uso", None)) else "Auto"}
+        for r in editado.itertuples()
+        if pd.notna(r.Largo_m) and pd.notna(r.Alto_m) and r.Largo_m > 0 and r.Alto_m > 0
+    ]
+
+    # Cálculo automático en tiempo real (a nivel de grupo)
+    n_muros = len(muros)
+    m2_total = round(sum(m["Largo_m"] * m["Alto_m"] for m in muros), 2)
+    ml_total = round(sum(m["Num_dovelas"] * m["Alto_m"] for m in muros), 2)
+    consumo_real = round(sacos_total / m2_total, 4) if m2_total > 0 else 0.0
+    consumo_kg = round(sacos_total * _kg(), 2)
+    consumo_kg_m2 = round(consumo_real * _kg(), 2)
+    cumple = cumple_meta(consumo_real, m2_total, sacos_total, meta=_meta())
+
+    # Bloques teóricos por tipo (solo si el tipo elegido está en el catálogo)
+    bloque_pv = _bloque_por_nombre(tipo_ladrillo)
+    bloque_ph = _bloque_por_nombre(tipo_ph) if tipo_ph else None
+    fila_bloques = ""
+    if bloque_pv and muros:
+        teos = [
+            bloques_teoricos_muro(m["Largo_m"], m["Alto_m"], m["Num_dovelas"],
+                                  bloque_pv, bloque_ph, uso=m["Uso"])
+            for m in muros
+        ]
+        pv_total = sum(t["pv"] for t in teos)
+        ph_total = sum(t["ph"] for t in teos)
+        fila_bloques = (
+            f"| Bloques teóricos (dovelas × hiladas) | "
+            f"**{pv_total:,.0f} P.V. + {ph_total:,.0f} P.H.** |\n"
+        )
+
+    estado_txt = "✓ SÍ" if cumple else "✗ NO"
+    st.info(
+        f"""**⚡ Calculado automáticamente** — grupo de **{n_muros}** muro(s)
+
+| Indicador | Valor |
+|---|---|
+| M² ejecutados (Σ Largo × Alto) | **{m2_total:.2f} m²** |
+| ML dovelas (Σ # Dovelas × Alto) | **{ml_total:.2f} ml** |
+{fila_bloques}| Consumo real ({sacos_total:.1f} sacos ÷ {m2_total:.2f} m²) | **{consumo_real:.3f} sac/m²** |
+| Mortero por m² ({consumo_real:.3f} sac/m² × {_kg():g} kg/saco) | **{consumo_kg_m2:.1f} kg/m²** |
+| Mortero TOTAL del grupo ({sacos_total:.1f} sacos × {_kg():g} kg/saco) | **{consumo_kg:.1f} kg** |
+| Cumple meta (≤ {_meta():g}) | **{estado_txt}** |
+"""
+    )
+
+    # Guardar
+    if st.button("💾 Guardar registro", type="primary"):
+        errores = []
+        if not oficial:
+            errores.append("El campo **Oficial** es obligatorio.")
+        if not sector:
+            errores.append("El campo **Sector** es obligatorio (escribe el nuevo sector).")
+        if not piso:
+            errores.append("El campo **Piso** es obligatorio.")
+        if n_muros == 0:
+            errores.append("Agrega al menos un muro con **Largo** y **Alto** mayores que 0.")
+
+        if errores:
+            for e in errores:
+                st.error(e)
+            return
+
+        # Guardia anti doble clic: un payload idéntico al recién guardado es un
+        # doble envío, no un registro nuevo.
+        firma = repr((str(fecha), oficial, ayudante, sector, piso, zona,
+                      tipo_ladrillo, tipo_ph, observaciones, float(sacos_total), muros))
+        ult = st.session_state.get("ultimo_registro_firma")
+        if ult and ult[0] == firma and datetime.now().timestamp() - ult[1] < 120:
+            st.warning(
+                "⚠️ Este registro es **idéntico** al que se acaba de guardar — no se "
+                "guardó otra vez (posible doble clic). Si de verdad es otro grupo "
+                "igual, cambia algo (ej. Observaciones) o espera 2 minutos."
+            )
+            return
+
+        base = {
+            "Fecha": pd.to_datetime(fecha),
+            "Oficial": oficial,
+            "Ayudante": ayudante,
+            "Sector": sector,
+            "Piso": piso,
+            "Zona": zona,
+            "Tipo_ladrillo": tipo_ladrillo,
+            "Tipo_bloque_PH": tipo_ph,
+            "Observaciones": observaciones,
+            "Timestamp_registro": datetime.now(),
+        }
+
+        try:
+            with st.spinner("Guardando…"):
+                nuevas = construir_filas_grupo(
+                    base, muros, sacos_total, kg_por_saco=_kg(), meta=_meta(),
+                    bloque_pv=bloque_pv, bloque_ph=bloque_ph,
+                )
+                agregar_registros(nuevas)  # append (eficiente en Supabase)
+            st.cache_data.clear()
+        except Exception as e:
+            st.error(f"No se pudo guardar el registro: {e}")
+            return
+
+        st.session_state["ultimo_registro_firma"] = (firma, datetime.now().timestamp())
+        st.session_state["flash"] = (
+            f"Registro guardado · **{oficial}** · {sector} · {piso} · "
+            f"{n_muros} muro(s) · {m2_total:.2f} m² · {sacos_total:.1f} sacos · "
+            f"consumo {consumo_real:.3f} ({'cumple ✓' if cumple else 'NO cumple ✗'})."
+        )
+        # Limpiar el formulario: subir la "versión" hace que TODOS los widgets
+        # (incluida la tabla de muros) nazcan de nuevo con sus valores por defecto.
+        # Streamlit descarta solo el estado de las keys viejas no renderizadas.
+        st.session_state["ingreso_nonce"] = n + 1
+        st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────
+# Pantalla 2 — Registros
+# ─────────────────────────────────────────────────────────────
+def pagina_registros(df: pd.DataFrame):
+    st.header("📊 Registros")
+
+    if df.empty:
+        st.info("Aún no hay registros. Ve a **📋 Ingreso de datos** para agregar el primero.")
+        return
+
+    with st.expander("🔍 Filtros", expanded=True):
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            of = st.selectbox("Oficial", ["Todos"] + opciones_unicas(df, "Oficial"))
+        with f2:
+            se = st.selectbox("Sector", ["Todos"] + opciones_unicas(df, "Sector"))
+        with f3:
+            pi = st.selectbox("Piso", ["Todos"] + opciones_unicas(df, "Piso"))
+        f4, f5 = st.columns(2)
+        with f4:
+            desde = st.date_input("Fecha desde", value=None)
+        with f5:
+            hasta = st.date_input("Fecha hasta", value=None)
+
+    filtrado = df.copy()
+    if of != "Todos":
+        filtrado = filtrado[filtrado["Oficial"] == of]
+    if se != "Todos":
+        filtrado = filtrado[filtrado["Sector"] == se]
+    if pi != "Todos":
+        filtrado = filtrado[filtrado["Piso"] == pi]
+    if desde is not None:
+        filtrado = filtrado[filtrado["Fecha"] >= pd.to_datetime(desde)]
+    if hasta is not None:
+        filtrado = filtrado[filtrado["Fecha"] <= pd.to_datetime(hasta)]
+
+    st.caption(f"**{len(filtrado)}** registros encontrados")
+
+    display = preparar_display(filtrado)
+    # Columna derivada solo para visualizar: kg de mortero por m² del registro.
+    if "Consumo_real_sac_m2" in display.columns:
+        display.insert(
+            display.columns.get_loc("Consumo_real_sac_m2") + 1,
+            "Mortero_kg_m2",
+            (pd.to_numeric(display["Consumo_real_sac_m2"], errors="coerce") * _kg()).round(2),
+        )
+    styler = estilar_consumo(display.style).format(
+        {
+            "Largo_m": "{:.2f}", "Alto_m": "{:.2f}", "M2_ejecutados": "{:.2f}",
+            "Num_sacos": "{:.1f}", "Consumo_real_sac_m2": "{:.3f}",
+            "Mortero_kg_m2": "{:.1f}", "Consumo_mortero_kg": "{:.1f}",
+            "ML_dovelas": "{:.2f}",
+            "Bloques_PV_teo": "{:,.0f}", "Bloques_PH_teo": "{:,.0f}",
+        },
+        na_rep="—",
+    )
+    st.dataframe(styler, height=450, width="stretch")
+
+    XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    st.caption("Descarga lo **filtrado** (lo que ves arriba) o **todo** el histórico:")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.download_button(
+            "⬇️ Excel (filtrado)",
+            data=excel_datos_y_resumen(filtrado),
+            file_name="registros_mamposteria.xlsx",
+            mime=XLSX_MIME,
+            width="stretch",
+            help="Excel con 2 hojas: datos crudos + resumen por oficial.",
+        )
+    with d2:
+        st.download_button(
+            "⬇️ CSV (filtrado)",
+            data=filtrado.to_csv(index=False).encode("utf-8"),
+            file_name="registros_mamposteria.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+    with d3:
+        st.download_button(
+            "⬇️ TODO el histórico (Excel)",
+            data=excel_datos_y_resumen(df),
+            file_name="registros_mamposteria_TODO.xlsx",
+            mime=XLSX_MIME,
+            width="stretch",
+            help="Ignora los filtros: exporta todos los registros + resumen.",
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# Pantalla 3 — Gráficas
+# ─────────────────────────────────────────────────────────────
+def pagina_graficas(df: pd.DataFrame):
+    st.header("📈 Gráficas")
+
+    if df.empty:
+        st.info("Aún no hay datos para graficar.")
+        return
+
+    # Tarjetas KPI
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total M² ejecutados", f"{df['M2_ejecutados'].sum():,.1f} m²")
+    prom = consumo_ratio(df)   # Σsacos ÷ Σm² (consistente con la barra KPI global)
+    k2.metric(
+        "Consumo promedio", f"{prom:.3f}",
+        delta=f"{prom - _meta():+.3f} vs meta", delta_color="inverse",
+    )
+    k2.caption(f"= {prom * _kg():.1f} kg/m²")
+    cumplen = int(df["Cumple_meta"].sum())
+    k3.metric("Registros que cumplen", f"{cumplen} / {len(df)}")
+    k4.metric("Oficiales distintos", df["Oficial"].nunique())
+
+    st.divider()
+
+    # Gráfica 1 y 2
+    g1, g2 = st.columns(2)
+
+    with g1:
+        por_oficial_m2 = (
+            df.groupby("Oficial", as_index=False)["M2_ejecutados"].sum()
+            .sort_values("M2_ejecutados", ascending=False)
+        )
+        fig1 = px.bar(
+            por_oficial_m2, x="Oficial", y="M2_ejecutados",
+            title="M² ejecutados por oficial", color_discrete_sequence=["#2980b9"],
+        )
+        fig1.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
+        st.plotly_chart(fig1, width="stretch")
+
+    with g2:
+        por_oficial_cons = consumo_por(df, "Oficial").sort_values("Consumo", ascending=False)
+        meta = _meta()
+        por_oficial_cons["color"] = por_oficial_cons["Consumo"].apply(
+            lambda v: "Supera meta" if v > meta else "Cumple meta"
+        )
+        fig2 = px.bar(
+            por_oficial_cons, x="Oficial", y="Consumo",
+            color="color",
+            color_discrete_map={"Supera meta": "#c0392b", "Cumple meta": "#1e8449"},
+            title=f"Consumo por oficial (Σsacos÷Σm², meta = {meta:g})",
+        )
+        fig2.add_hline(
+            y=meta, line_dash="dash", line_color="red",
+            annotation_text=f"Meta {meta:g}", annotation_position="top left",
+        )
+        fig2.update_layout(xaxis_title="", yaxis_title="Consumo (sac/m²)", legend_title="")
+        st.plotly_chart(fig2, width="stretch")
+
+    # Gráfica 3 — evolución diaria
+    por_dia = (
+        df.dropna(subset=["Fecha"])
+        .groupby(df["Fecha"].dt.date, as_index=False)["M2_ejecutados"].sum()
+        .rename(columns={"Fecha": "Día"})
+    )
+    if not por_dia.empty:
+        por_dia.columns = ["Día", "M2_ejecutados"]
+        fig3 = px.line(
+            por_dia, x="Día", y="M2_ejecutados", markers=True,
+            title="Evolución diaria de M² ejecutados",
+        )
+        fig3.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
+        st.plotly_chart(fig3, width="stretch")
+
+    # Gráfica 4 — Presencia de mamposteros (primer→último día + estado)
+    st.subheader("Presencia de mamposteros")
+    st.caption(
+        "Cada barra va del **primer** al **último** día con registro de cada oficial. "
+        "🟢 Activo · 🟡 En pausa (7+ días sin registrar) · ⚪ Inactivo (30+ días)."
+    )
+
+    df_f = df.dropna(subset=["Fecha"])
+    ref = df_f["Fecha"].max()
+    pres = (
+        df_f.groupby("Oficial")
+        .agg(
+            primer_dia=("Fecha", "min"),
+            ultimo_dia=("Fecha", "max"),
+            dias=("Fecha", lambda s: s.dt.date.nunique()),
+            m2_total=("M2_ejecutados", "sum"),
+        )
+        .reset_index()
+    )
+    pres["dias_sin_venir"] = (ref - pres["ultimo_dia"]).dt.days
+    pres["Estado"] = pres["dias_sin_venir"].apply(estado_presencia)
+    pres["fin"] = pres["ultimo_dia"] + pd.Timedelta(days=1)   # ancho visible si trabajó 1 día
+
+    orden = pres.sort_values("ultimo_dia")["Oficial"].tolist()
+    fig4 = px.timeline(
+        pres, x_start="primer_dia", x_end="fin", y="Oficial", color="Estado",
+        color_discrete_map={"Activo": "#1e8449", "En pausa": "#f39c12", "Inactivo": "#95a5a6"},
+        hover_data={"dias": True, "m2_total": ":.0f", "dias_sin_venir": True,
+                    "primer_dia": False, "fin": False},
+    )
+    # Marcas de los días con registro real dentro de cada barra.
+    dias_trab = df_f.drop_duplicates(["Oficial", "Fecha"])
+    fig4.add_trace(go.Scatter(
+        x=dias_trab["Fecha"], y=dias_trab["Oficial"], mode="markers",
+        marker=dict(color="rgba(44,62,80,0.45)", size=7, symbol="line-ns-open"),
+        name="día con registro", hoverinfo="skip",
+    ))
+    # x en ms epoch: en plotly 6 add_vline+annotation falla con un Timestamp directo.
+    fig4.add_vline(x=ref.timestamp() * 1000, line_dash="dash", line_color="#7f8c8d",
+                   annotation_text="último dato")
+    fig4.update_yaxes(categoryorder="array", categoryarray=orden, title="")
+    fig4.update_xaxes(title="")
+    fig4.update_layout(height=max(300, len(pres) * 38), legend_title="")
+    st.plotly_chart(fig4, width="stretch")
+
+    st.divider()
+
+    # Tabla resumen por oficial
+    st.subheader("Resumen por oficial")
+    resumen = resumen_por(df, "Oficial")
+
+    styler = estilar_consumo(resumen.style, columna="Consumo_promedio").format(
+        {
+            "M2_total": "{:.1f}", "Consumo_promedio": "{:.3f}",
+            "Sacos_total": "{:.1f}", "Pct_cumple": "{:.0f}%",
+        }
+    )
+    st.dataframe(styler, width="stretch")
+
+    st.download_button(
+        "⬇️ Descargar resumen (Excel)",
+        data=excel_datos_y_resumen(df),
+        file_name="resumen_mamposteria.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Excel con 2 hojas: datos crudos + resumen por oficial.",
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Pantalla 4 — Cierres (diario y semanal)
+# ─────────────────────────────────────────────────────────────
+def _m2_sector(sub: pd.DataFrame, sector: str) -> float:
+    return sub.loc[sub["Sector"] == sector, "M2_ejecutados"].sum()
+
+
+def pagina_cierres(df: pd.DataFrame):
+    st.header("📅 Cierres")
+
+    if df.empty:
+        st.info("Aún no hay datos para cerrar.")
+        return
+
+    df = df.dropna(subset=["Fecha"]).copy()
+    tab_dia, tab_semana = st.tabs(["📆 Cierre diario", "🗓️ Cierre semanal"])
+
+    # ── Cierre diario ────────────────────────────────────────
+    with tab_dia:
+        fechas = sorted(df["Fecha"].dt.date.unique())
+        dia = st.date_input(
+            "Día a cerrar", value=fechas[-1],
+            min_value=fechas[0], max_value=fechas[-1],
+        )
+        del_dia = df[df["Fecha"].dt.date == dia]
+
+        m2_torre = _m2_sector(del_dia, "Torre")
+        m2_plat = _m2_sector(del_dia, "Plataforma")
+        m2_total = del_dia["M2_ejecutados"].sum()
+
+        t1, t2, t3 = st.columns(3)
+        t1.metric("🏢 TOTAL M² TORRE", f"{m2_torre:,.2f} m²")
+        t2.metric("🟦 TOTAL M² PLATAFORMA", f"{m2_plat:,.2f} m²")
+        t3.metric("📌 TOTAL M² DÍA", f"{m2_total:,.2f} m²")
+
+        if del_dia.empty:
+            st.info("No hay registros para ese día.")
+        else:
+            cols = ["Sector", "Oficial", "Ayudante", "Piso", "Zona",
+                    "M2_ejecutados", "Num_sacos", "Consumo_real_sac_m2", "Cumple_meta"]
+            tabla = preparar_display(del_dia[cols].sort_values(["Sector", "Oficial"]))
+            styler = estilar_consumo(tabla.style).format(
+                {"M2_ejecutados": "{:.2f}", "Num_sacos": "{:.1f}",
+                 "Consumo_real_sac_m2": "{:.3f}"}, na_rep="—",
+            )
+            st.dataframe(styler, width="stretch")
+
+    # ── Cierre semanal ───────────────────────────────────────
+    with tab_semana:
+        df_sem = df.assign(_sem=df["Fecha"].dt.to_period("W"))
+        opciones = sorted(df_sem["_sem"].unique(), reverse=True)
+
+        def etiqueta(p):
+            return f"Semana {p.start_time:%d/%m} – {p.end_time:%d/%m/%Y}"
+
+        sel = st.selectbox("Semana", opciones, format_func=etiqueta)
+        del_sem = df_sem[df_sem["_sem"] == sel]
+
+        s1, s2, s3 = st.columns(3)
+        s1.metric("🏢 M² Torre (semana)", f"{_m2_sector(del_sem, 'Torre'):,.1f} m²")
+        s2.metric("🟦 M² Plataforma (semana)", f"{_m2_sector(del_sem, 'Plataforma'):,.1f} m²")
+        s3.metric("📌 M² Total (semana)", f"{del_sem['M2_ejecutados'].sum():,.1f} m²")
+
+        st.subheader("Cuánto hizo cada mampostero")
+        cierre = resumen_por(
+            del_sem, "Oficial",
+            extra={"Dias": ("Fecha", lambda s: s.dt.date.nunique())},
+        )
+
+        styler = estilar_consumo(cierre.style, columna="Consumo_promedio").format(
+            {"M2_total": "{:.1f}", "Sacos_total": "{:.1f}",
+             "Consumo_promedio": "{:.3f}", "Pct_cumple": "{:.0f}%"}
+        )
+        st.dataframe(styler, width="stretch")
+        st.caption("Los M² se atribuyen al **oficial**; el ayudante queda registrado pero no suma m² aparte.")
+
+        st.download_button(
+            "⬇️ Descargar cierre semanal (Excel)",
+            data=excel_bytes(cierre),
+            file_name=f"cierre_semanal_{sel.start_time:%Y%m%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# Pantalla 5 — Materiales y desperdicio (bloques P.V./P.H.)
+# ─────────────────────────────────────────────────────────────
+def _filtrar_fechas(df: pd.DataFrame, desde, hasta) -> pd.DataFrame:
+    out = df.dropna(subset=["Fecha"])
+    if desde is not None:
+        out = out[out["Fecha"] >= pd.to_datetime(desde)]
+    if hasta is not None:
+        out = out[out["Fecha"] <= pd.to_datetime(hasta)]
+    return out
+
+
+def _tab_registrar_salida(df: pd.DataFrame, df_sal: pd.DataFrame, nombres_bloques: list):
+    """Sub-pestaña: digitar vales de salida de almacén (en unidades o estibas)."""
+    st.caption(
+        "Digita cada **remisión** (el documento con el que el almacén registra cada "
+        "salida de material). Nadie cuenta ladrillos pegados: el desperdicio sale de "
+        "comparar lo entregado contra el teórico de los muros registrados en "
+        "📋 Ingreso de datos."
+    )
+    if not nombres_bloques:
+        st.warning("El catálogo de bloques está vacío: pide al admin configurarlo abajo.")
+        return
+
+    with st.form("form_salida"):
+        v1, v2, v3 = st.columns(3)
+        with v1:
+            fecha_s = st.date_input("Fecha de la salida *", value=datetime.now().date(),
+                                    key="sal_fecha")
+        with v2:
+            sectores_s = ["Torre", "Plataforma"] + [
+                s for s in opciones_unicas(df, "Sector") if s not in ("Torre", "Plataforma")
+            ]
+            sector_s = st.selectbox("Sector *", sectores_s, key="sal_sector")
+        with v3:
+            piso_s = st.text_input("Piso *", placeholder="Ej: 5", key="sal_piso")
+        v4, v5, v6 = st.columns(3)
+        with v4:
+            tipo_s = st.selectbox("Tipo de bloque *", nombres_bloques, key="sal_tipo")
+        with v5:
+            cantidad_s = st.number_input("Cantidad *", min_value=0.0, step=1.0,
+                                         format="%.1f", key="sal_cantidad")
+        with v6:
+            unidad_s = st.radio("Unidad", ["Unidades", "Estibas"], horizontal=True,
+                                key="sal_unidad")
+        v7, v8 = st.columns(2)
+        with v7:
+            vale_s = st.text_input(
+                "# Remisión (opcional)",
+                key="sal_vale",
+                help="Número del documento de salida de almacén (remisión/vale). "
+                     "Sirve para no digitar dos veces y auditar contra el almacén.",
+            )
+        with v8:
+            obs_s = st.text_input("Observaciones", key="obs_salida")
+        enviar_s = st.form_submit_button("💾 Guardar salida", type="primary")
+
+    if enviar_s:
+        errores = []
+        if not piso_s.strip():
+            errores.append("El campo **Piso** es obligatorio.")
+        if cantidad_s <= 0:
+            errores.append("La **cantidad** debe ser mayor que 0.")
+        # Una remisión ya digitada con el mismo tipo de bloque es un duplicado.
+        if vale_s.strip() and not df_sal.empty and "No_vale" in df_sal.columns:
+            ya = df_sal[
+                (df_sal["No_vale"].astype(str).str.strip() == vale_s.strip())
+                & (df_sal["Tipo_bloque"].astype(str).str.strip() == tipo_s)
+            ]
+            if not ya.empty:
+                errores.append(
+                    f"La remisión **{vale_s.strip()}** ya está digitada con "
+                    f"**{tipo_s}** (revisa *Últimas salidas*). Si la misma remisión "
+                    "trae otro tipo de bloque, digítala con ese otro tipo; si es "
+                    "otra remisión, corrige el número."
+                )
+        if errores:
+            for e in errores:
+                st.error(e)
+            return
+
+        # Guardia anti doble clic (cubre las salidas sin # remisión).
+        firma_s = repr((str(fecha_s), sector_s, piso_s.strip(), tipo_s,
+                        float(cantidad_s), unidad_s, vale_s.strip(), obs_s.strip()))
+        ult_s = st.session_state.get("ultima_salida_firma")
+        if ult_s and ult_s[0] == firma_s and datetime.now().timestamp() - ult_s[1] < 120:
+            st.warning(
+                "⚠️ Esta salida es **idéntica** a la que se acaba de guardar — no se "
+                "guardó otra vez (posible doble clic)."
+            )
+            return
+
+        bloque_s = _bloque_por_nombre(tipo_s) or {}
+        por_estiba = float(bloque_s.get("unds_por_estiba", 1) or 1)
+        unds = cantidad_s * por_estiba if unidad_s == "Estibas" else cantidad_s
+        fila = pd.DataFrame([{
+            "Fecha": pd.to_datetime(fecha_s),
+            "Sector": sector_s,
+            "Piso": piso_s.strip(),
+            "Tipo_bloque": tipo_s,
+            "Cantidad": float(unds),
+            "No_vale": vale_s.strip(),
+            "Observaciones": obs_s.strip(),
+            "Timestamp_registro": datetime.now(),
+        }])[COLUMNAS_SALIDAS]
+        try:
+            with st.spinner("Guardando…"):
+                agregar_salidas(fila)
+            cargar_salidas_cached.clear()
+        except Exception as e:
+            st.error(f"No se pudo guardar la salida: {e}")
+            return
+        detalle = (f" ({cantidad_s:g} estibas × {por_estiba:g} und)"
+                   if unidad_s == "Estibas" else "")
+        st.session_state["ultima_salida_firma"] = (firma_s, datetime.now().timestamp())
+        st.session_state["flash_salida"] = (
+            f"Salida guardada · **{tipo_s}** · {unds:,.0f} unidades{detalle} · "
+            f"{sector_s} · piso {piso_s.strip()}."
+        )
+        # Limpiar el formulario para que no quede listo para un segundo guardado.
+        for k in ("sal_fecha", "sal_sector", "sal_piso", "sal_tipo",
+                  "sal_cantidad", "sal_unidad", "sal_vale", "obs_salida"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    if not df_sal.empty:
+        st.subheader("Últimas salidas")
+        ult = (df_sal.sort_values("Timestamp_registro", ascending=False).head(15)
+               .rename(columns={"No_vale": "# Remisión"}))
+        st.dataframe(preparar_display(ult), width="stretch")
+
+
+def _tab_conciliacion(df: pd.DataFrame, df_sal: pd.DataFrame):
+    """Sub-pestaña: teórico vs entregado con semáforo de desperdicio."""
+    if df.empty and df_sal.empty:
+        st.info("Aún no hay registros ni salidas para conciliar.")
+        return
+
+    st.caption(
+        f"**Desperdicio % = (entregado − teórico ajustado) ÷ teórico ajustado.** "
+        f"Teórico ajustado = teórico × **{_factor_ajuste():g}** (factor por cortes/trabas, "
+        f"configurable). Semáforo: 🟢 ≤ {_umbral_pct():g}% · 🟠 ≤ {1.5 * _umbral_pct():g}% · 🔴 mayor. "
+        "Solo los registros guardados con catálogo aportan teórico (los viejos no)."
+    )
+
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        desde_c = st.date_input("Desde", value=None, key="conc_desde")
+    with fc2:
+        hasta_c = st.date_input("Hasta", value=None, key="conc_hasta")
+    with fc3:
+        sec_c = st.selectbox("Sector", ["Todos"] + opciones_unicas(df, "Sector"),
+                             key="conc_sector")
+    with fc4:
+        nivel_c = st.selectbox("Agrupar por", ["Sector y piso", "Solo sector", "Toda la obra"],
+                               key="conc_nivel")
+
+    reg_f = _filtrar_fechas(df, desde_c, hasta_c)
+    sal_f = _filtrar_fechas(df_sal, desde_c, hasta_c)
+    if sec_c != "Todos":
+        reg_f = reg_f[reg_f["Sector"] == sec_c]
+        sal_f = sal_f[sal_f["Sector"] == sec_c]
+
+    dims = {
+        "Sector y piso": ("Sector", "Piso", "Tipo_bloque"),
+        "Solo sector": ("Sector", "Tipo_bloque"),
+        "Toda la obra": ("Tipo_bloque",),
+    }[nivel_c]
+    conc = conciliacion(reg_f, sal_f, dims=dims, factor_ajuste=_factor_ajuste())
+
+    if conc.empty:
+        st.info("No hay datos en el rango seleccionado.")
+        return
+
+    teo_t = conc["Teorico_ajustado"].sum()
+    ent_t = conc["Entregado"].sum()
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Teórico ajustado", f"{teo_t:,.0f} und")
+    mc2.metric("Entregado almacén", f"{ent_t:,.0f} und")
+    if teo_t > 0:
+        mc3.metric("Desperdicio global", f"{(ent_t - teo_t) / teo_t * 100:+.1f}%",
+                   delta=f"umbral {_umbral_pct():g}%", delta_color="off")
+    else:
+        mc3.metric("Desperdicio global", "—")
+
+    styler = estilar_desperdicio(conc.style).format(
+        {
+            "Teorico": "{:,.0f}", "Teorico_ajustado": "{:,.0f}",
+            "Entregado": "{:,.0f}", "Diferencia": "{:+,.0f}",
+            "Desperdicio_pct": "{:+.1%}",
+        },
+        na_rep="—",
+    )
+    st.dataframe(styler, width="stretch")
+    st.caption(
+        "**Diferencia > 0** = salió más bloque del que se pegó (desperdicio o pega sin "
+        "registrar). **Sin teórico** (—) = se entregó un tipo que no aparece en ningún "
+        "registro: revisar a qué muros se está yendo."
+    )
+
+    st.download_button(
+        "⬇️ Descargar conciliación (Excel)",
+        data=excel_bytes(conc),
+        file_name="conciliacion_bloques.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+def _tab_graficas_desperdicio(df: pd.DataFrame, df_sal: pd.DataFrame):
+    """Sub-pestaña: desperdicio % por piso/tipo y tendencia semanal."""
+    conc_pt = conciliacion(df, df_sal, dims=("Piso", "Tipo_bloque"),
+                           factor_ajuste=_factor_ajuste())
+    conc_pt = conc_pt[conc_pt["Desperdicio_pct"].notna()].copy()
+    if conc_pt.empty:
+        st.info("Aún no hay teórico y entregado del mismo piso/tipo para graficar.")
+        return
+
+    conc_pt["Desperdicio %"] = conc_pt["Desperdicio_pct"] * 100
+    fig = px.bar(
+        conc_pt, x="Piso", y="Desperdicio %", color="Tipo_bloque", barmode="group",
+        title="Desperdicio % por piso y tipo de bloque",
+    )
+    fig.add_hline(y=_umbral_pct(), line_dash="dash", line_color="red",
+                  annotation_text=f"Umbral {_umbral_pct():g}%",
+                  annotation_position="top left")
+    fig.update_layout(xaxis_title="", legend_title="")
+    st.plotly_chart(fig, width="stretch")
+
+    df_sem = df.dropna(subset=["Fecha"]).copy()
+    sal_sem = df_sal.dropna(subset=["Fecha"]).copy()
+    if df_sem.empty or sal_sem.empty:
+        return
+    df_sem["Semana"] = df_sem["Fecha"].dt.to_period("W").dt.start_time
+    sal_sem["Semana"] = sal_sem["Fecha"].dt.to_period("W").dt.start_time
+    conc_sem = conciliacion(df_sem, sal_sem, dims=("Semana", "Tipo_bloque"),
+                            factor_ajuste=_factor_ajuste())
+    conc_sem = conc_sem[conc_sem["Desperdicio_pct"].notna()].copy()
+    if conc_sem.empty:
+        return
+    conc_sem["Desperdicio %"] = conc_sem["Desperdicio_pct"] * 100
+    fig2 = px.line(
+        conc_sem, x="Semana", y="Desperdicio %", color="Tipo_bloque", markers=True,
+        title="Tendencia semanal del desperdicio %",
+    )
+    fig2.add_hline(y=_umbral_pct(), line_dash="dash", line_color="red")
+    fig2.update_layout(xaxis_title="", legend_title="")
+    st.plotly_chart(fig2, width="stretch")
+
+
+def _editor_catalogo(catalogo: list):
+    """Expander (solo admin): editar el catálogo de bloques; persiste en Supabase."""
+    with st.expander("📚 Catálogo de bloques (admin)"):
+        st.caption(
+            "Medidas del **bloque** en metros; el módulo (bloque + junta) define los "
+            "bloques/m² (ej. 0.39 + 0.01 y 0.19 + 0.01 → 0.40×0.20 → 12.5 und/m²). "
+            "⚠️ **No renombres** un tipo que ya tenga registros o salidas: el cruce "
+            "teórico↔entregado se hace por nombre."
+        )
+        # Mismo defecto de st.data_editor que en Ingreso: la key lleva "versión"
+        # para que tras guardar el editor renazca con el catálogo ya validado.
+        nc = st.session_state.setdefault("catalogo_nonce", 0)
+        cat_edit = st.data_editor(
+            pd.DataFrame(catalogo),
+            num_rows="dynamic",
+            key=f"catalogo_editor_{nc}",
+            width="stretch",
+            column_config={
+                "nombre": st.column_config.TextColumn("Nombre", required=True),
+                "clase": st.column_config.SelectboxColumn("Clase", options=["PV", "PH"],
+                                                          default="PV", required=True),
+                "largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0,
+                                                         step=0.01, format="%.3f"),
+                "alto_m": st.column_config.NumberColumn("Alto (m)", min_value=0.0,
+                                                        step=0.01, format="%.3f"),
+                "espesor_m": st.column_config.NumberColumn("Espesor (m)", min_value=0.0,
+                                                           step=0.01, format="%.3f"),
+                "junta_m": st.column_config.NumberColumn("Junta (m)", min_value=0.0,
+                                                         step=0.005, format="%.3f"),
+                "unds_por_estiba": st.column_config.NumberColumn("Und/estiba", min_value=1,
+                                                                 step=1, format="%d"),
+            },
+        )
+        if not config_persistente():
+            st.info("La edición permanente del catálogo requiere **Supabase**; "
+                    "mientras tanto se usa el catálogo por defecto del código.")
+            return
+        if st.button("💾 Guardar catálogo"):
+            try:
+                guardar_catalogo(cat_edit.to_dict("records"))
+                cargar_catalogo_cached.clear()
+                st.session_state["catalogo"] = leer_catalogo()
+            except Exception as e:
+                st.error(f"No se pudo guardar el catálogo: {e}")
+                return
+            st.session_state["catalogo_nonce"] = nc + 1
+            st.toast("Catálogo guardado ✅")
+            st.rerun()
+
+
+def pagina_materiales(df: pd.DataFrame):
+    st.header("🧱 Materiales y desperdicio")
+
+    if "flash_salida" in st.session_state:
+        st.success(st.session_state.pop("flash_salida"))
+
+    try:
+        df_sal = cargar_salidas_cached()
+    except Exception as e:
+        st.error(
+            "No se pudieron leer las salidas de almacén. Si usas Supabase, corre la "
+            "sección nueva de `supabase_schema.sql` (tabla `almacen_salidas`)."
+        )
+        with st.expander("Detalle técnico"):
+            st.code(str(e))
+        return
+
+    catalogo = _catalogo()
+    nombres_bloques = [b["nombre"] for b in catalogo]
+
+    tab_reg, tab_conc, tab_graf = st.tabs(
+        ["📥 Registrar salida", "⚖️ Conciliación", "📈 Gráficas"]
+    )
+    with tab_reg:
+        _tab_registrar_salida(df, df_sal, nombres_bloques)
+    with tab_conc:
+        _tab_conciliacion(df, df_sal)
+    with tab_graf:
+        _tab_graficas_desperdicio(df, df_sal)
+
+    if _es_admin():
+        _editor_catalogo(catalogo)
+
+
+# ─────────────────────────────────────────────────────────────
+# Autenticación — login con Supabase Auth (email + contraseña · $0, sin Azure)
+# ─────────────────────────────────────────────────────────────
+def _correos_autorizados() -> set:
+    """Lista blanca de correos (en minúsculas) tomada de los secrets.
+    Vacía ⇒ se permite cualquier cuenta que se registre/inicie sesión."""
+    try:
+        crudo = str(st.secrets.get("CORREOS_AUTORIZADOS", "")).strip()
+    except Exception:
+        crudo = ""
+    return {c.strip().lower() for c in crudo.replace(";", ",").split(",") if c.strip()}
+
+
+def _correos_admin() -> set:
+    """Correos (en minúsculas) que pueden EDITAR la configuración.
+
+    Se toman de `CORREOS_ADMIN` en los secrets. Si está vacío, se reutiliza la
+    lista de `CORREOS_AUTORIZADOS`; y si esa también está vacía (modo abierto),
+    cualquier usuario autenticado se considera admin."""
+    try:
+        crudo = str(st.secrets.get("CORREOS_ADMIN", "")).strip()
+    except Exception:
+        crudo = ""
+    admins = {c.strip().lower() for c in crudo.replace(";", ",").split(",") if c.strip()}
+    return admins or _correos_autorizados()
+
+
+def _es_admin() -> bool:
+    """True si el usuario en sesión puede editar la configuración."""
+    correo = (st.session_state.get("auth_email") or "").lower()
+    if not correo:
+        return False
+    admins = _correos_admin()
+    return (not admins) or (correo in admins)
+
+
+def _logout() -> None:
+    """Cierra la sesión local (callback del botón 'Cerrar sesión')."""
+    st.session_state.pop("auth_email", None)
+
+
+def _pantalla_login() -> None:
+    """Formulario de Iniciar sesión / Registrarse contra Supabase Auth."""
+    st.markdown("## 🧱 Control de Mampostería")
+    st.caption("Inicia sesión para continuar. La cuenta es gratuita y la gestiona Supabase.")
+
+    tab_entrar, tab_registro = st.tabs(["Iniciar sesión", "Registrarse"])
+
+    with tab_entrar:
+        with st.form("form_login"):
+            email = st.text_input("Correo")
+            pwd = st.text_input("Contraseña", type="password")
+            enviar = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+        if enviar:
+            ok, payload = auth.iniciar_sesion(email, pwd)
+            if ok:
+                st.session_state["auth_email"] = payload
+                st.rerun()
+            else:
+                st.error(payload)
+
+    with tab_registro:
+        with st.form("form_registro"):
+            email_r = st.text_input("Correo", key="reg_email")
+            pwd_r = st.text_input("Contraseña (mínimo 6 caracteres)", type="password", key="reg_pwd")
+            crear = st.form_submit_button("Crear cuenta", use_container_width=True)
+        if crear:
+            ok, mensaje, necesita_confirmar = auth.registrar(email_r, pwd_r)
+            if ok and not necesita_confirmar:
+                st.session_state["auth_email"] = (email_r or "").strip().lower()
+                st.rerun()
+            elif ok:
+                st.info(mensaje)
+            else:
+                st.error(mensaje)
+
+    st.stop()
+
+
+def requerir_login() -> None:
+    """Bloquea la app hasta iniciar sesión. Si hay lista blanca, valida el correo."""
+    if not auth.disponible():
+        st.error(
+            "El login necesita Supabase. Configura `SUPABASE_URL` y `SUPABASE_KEY` "
+            "en `.streamlit/secrets.toml`."
+        )
+        st.stop()
+
+    if not st.session_state.get("auth_email"):
+        _pantalla_login()   # renderiza el formulario y hace st.stop()
+
+    autorizados = _correos_autorizados()
+    if autorizados and st.session_state["auth_email"] not in autorizados:
+        st.error(
+            f"La cuenta **{st.session_state['auth_email']}** no está autorizada.\n\n"
+            "Pide al administrador que agregue tu correo a la lista de acceso."
+        )
+        st.button("Cerrar sesión", on_click=_logout)
+        st.stop()
+
+
+def _render_estado_conexion(conectado: bool) -> None:
+    """Muestra en el sidebar el estado REAL de la conexión al backend de datos."""
+    if not conectado:
+        st.error("🔴 **No conectado a la base de datos**")
+        return
+    info = estado()
+    render = st.warning if info["tipo"] == "local" else st.success
+    render(f"{info['icono']} **{info['titulo']}**")
+
+
+def _editor_config() -> None:
+    """Panel (solo admin) para editar meta, kg/saco y proyecto; persiste en Supabase.
+
+    El cambio aplica de inmediato a los indicadores que se calculan en vivo
+    (colores, deltas vs meta, línea de meta) y a los registros NUEVOS. El histórico
+    ya guardado conserva su `Cumple_meta`/`kg` del momento en que se ingresó."""
+    with st.expander("⚙️ Configuración (admin)"):
+        if not config_persistente():
+            st.info(
+                "La edición permanente requiere **Supabase**. Con SharePoint o el "
+                "modo local los valores quedan fijos en el código."
+            )
+            return
+
+        cfg = _cfg()
+        with st.form("form_config"):
+            proyecto = st.text_input("Nombre del proyecto", value=cfg.get("proyecto", PROYECTO))
+            meta = st.number_input(
+                "Meta teórica (sac/m²)", min_value=0.0, step=0.01, format="%.3f",
+                value=float(cfg.get("meta_sac_m2", TEORICO_SAC_M2)),
+            )
+            kg = st.number_input(
+                "KG por saco", min_value=0.0, step=0.5, format="%.1f",
+                value=float(cfg.get("kg_por_saco", KG_POR_SACO)),
+            )
+            umbral = st.number_input(
+                "Umbral desperdicio bloques (%)", min_value=0.0, step=0.5, format="%.1f",
+                value=float(cfg.get("umbral_desperdicio_pct", UMBRAL_DESPERDICIO_PCT)),
+                help="Semáforo de la conciliación en 🧱 Materiales (verde si ≤ umbral).",
+            )
+            factor = st.number_input(
+                "Factor de ajuste bloques teóricos", min_value=0.5, max_value=2.0,
+                step=0.01, format="%.2f",
+                value=float(cfg.get("factor_ajuste_bloques", FACTOR_AJUSTE_BLOQUES)),
+                help="Multiplica el teórico en la conciliación para cubrir medios "
+                     "bloques/trabas (ej. 1.03–1.05). 1.00 = sin ajuste.",
+            )
+            guardar = st.form_submit_button(
+                "💾 Guardar configuración", type="primary", use_container_width=True
+            )
+
+        if guardar:
+            if meta <= 0 or kg <= 0 or not proyecto.strip():
+                st.error("La meta y los kg deben ser mayores que 0, y el proyecto no puede ir vacío.")
+                return
+            try:
+                guardar_config(meta, kg, proyecto.strip(),
+                               umbral_desperdicio_pct=umbral,
+                               factor_ajuste_bloques=factor)
+                cargar_config_cached.clear()             # invalida la caché de 60 s
+                st.session_state["cfg"] = leer_config()  # refresca de inmediato
+            except Exception as e:
+                st.error(f"No se pudo guardar la configuración: {e}")
+                return
+            st.toast("Configuración guardada ✅")   # sobrevive al rerun
+            st.rerun()
+
+
+def main():
+    requerir_login()
+
+    # Cargar datos PRIMERO para conocer el estado real de conexión a la BD.
+    df, conectado, detalle_error = cargar_datos_estado()
+
+    # Config editable (meta, kg/saco, proyecto): cacheada 60 s, defectos si falla.
+    st.session_state["cfg"] = cargar_config_cached()
+    # Catálogo de bloques (P.V./P.H.) para los bloques teóricos y las salidas.
+    st.session_state["catalogo"] = cargar_catalogo_cached()
+
+    with st.sidebar:
+        st.markdown("## 🧱 Control\nMampostería")
+        st.markdown("---")
+        pagina = st.radio(
+            "Navegación",
+            ["📋 Ingreso de datos", "📊 Registros", "📈 Gráficas", "📅 Cierres",
+             "🧱 Materiales"],
+            label_visibility="collapsed",
+        )
+        st.markdown("---")
+        st.caption(f"📁 Proyecto: {_proyecto()}")
+        st.caption(f"🎯 Meta teórica: {_meta():g} sac/m²")
+        st.caption(f"⚖️ KG por saco: {_kg():g} kg")
+        if _es_admin():
+            _editor_config()
+        st.markdown("---")
+        _render_estado_conexion(conectado)
+        st.markdown("---")
+        st.caption(f"👤 {st.session_state.get('auth_email', '')}")
+        st.button("Cerrar sesión", use_container_width=True, on_click=_logout)
+
+    # Si no hay conexión, avisar en el área principal y no continuar.
+    if not conectado:
+        st.error(
+            "No se pudo conectar a la base de datos. Verifica tu conexión a internet "
+            "o que el proyecto de Supabase esté activo, y vuelve a intentar."
+        )
+        with st.expander("Detalle técnico"):
+            st.code(detalle_error or "sin detalle")
+        st.stop()
+
+    barra_kpi_global(df)
+
+    if pagina == "📋 Ingreso de datos":
+        pagina_ingreso(df)
+    elif pagina == "📊 Registros":
+        pagina_registros(df)
+    elif pagina == "📈 Gráficas":
+        pagina_graficas(df)
+    elif pagina == "📅 Cierres":
+        pagina_cierres(df)
+    else:
+        pagina_materiales(df)
+
+
+if __name__ == "__main__":
+    main()
