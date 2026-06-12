@@ -1,4 +1,4 @@
-# 🧱 Control de Mampostería — Serrania Campestre
+#  Control de Mampostería — Serrania Campestre
 
 App **Streamlit** para registrar el trabajo diario de mampostería por oficial,
 calcular indicadores (M², consumo de mortero, cumplimiento de meta, bloques
@@ -56,9 +56,9 @@ MVP_MyT/
 | `FACTOR_AJUSTE_BLOQUES` | 1.0 | Ajuste del teórico por cortes/trabas |
 
 Un registro **cumple meta** cuando `Consumo_real_sac_m2 ≤ 0.84`. Los cuatro
-valores son editables por el admin desde la app (panel ⚙️ y catálogo).
+valores son editables por el admin desde la app (panel  y catálogo).
 
-## Módulo de desperdicio de bloques (🧱 Materiales)
+## Módulo de desperdicio de bloques ( Materiales)
 
 Calcula los **bloques teóricos por tipo** (perforación vertical/horizontal) de
 cada muro a partir de Largo × Alto y # dovelas, y los concilia contra las
