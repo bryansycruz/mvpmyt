@@ -34,15 +34,32 @@ FACTOR_AJUSTE_BLOQUES = 1.0
 # la obra (1.5 cm en Serrania; con 2.0 cm el admin la sube en el catálogo).
 # bloque + junta = módulo: 0.415 × 0.215 → 11.2 und/m², hilada de 0.215 m.
 # `unds_por_estiba` permite digitar las salidas de almacén en estibas.
+# `meta_pedido` es el total pedido del proyecto/torre para ese tipo de bloque
+# (0 = sin meta); sirve para ver el % del pedido recibido en 📦 Movimientos de almacén.
+#
+# Los 8 tipos y sus números (unds_por_estiba, meta_pedido) salen del control real
+# de entrada (Excel "Control ladrillo", una hoja por tipo). El admin los edita en
+# el catálogo. Medidas de Catalán moreno y Bloque 20: POR CONFIRMAR (solo afectan
+# el teórico de la conciliación si se usan en muros).
 CATALOGO_BLOQUES_DEFECTO = [
+    # P.V. = perforación vertical (estructural, donde van las dovelas).
     {"nombre": "P.V. rayado 12", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
-     "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 90},
+     "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 135, "meta_pedido": 183614},
     {"nombre": "P.V. rayado 15", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
-     "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 72},
+     "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 118, "meta_pedido": 113822},
+    {"nombre": "P.V. liso 12", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
+     "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 108, "meta_pedido": 13814},
+    {"nombre": "P.V. liso 15", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
+     "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 96, "meta_pedido": 30784},
+    {"nombre": "Catalán moreno", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
+     "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 280, "meta_pedido": 63045},
+    {"nombre": "Bloque 20", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
+     "espesor_m": 0.20, "junta_m": 0.015, "unds_por_estiba": 1, "meta_pedido": 6833},
+    # P.H. = perforación horizontal (divisorio).
     {"nombre": "P.H. rayado 12", "clase": "PH", "largo_m": 0.40, "alto_m": 0.20,
-     "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 90},
+     "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 135, "meta_pedido": 0},
     {"nombre": "P.H. rayado 15", "clase": "PH", "largo_m": 0.40, "alto_m": 0.20,
-     "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 72},
+     "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 125, "meta_pedido": 0},
 ]
 
 
@@ -246,6 +263,7 @@ def validar_catalogo(crudo) -> list[dict]:
             "espesor_m": _num(item, "espesor_m", 0.12),
             "junta_m": _num(item, "junta_m", 0.015, minimo_excl=-1.0),  # 0 es válido (medidas modulares)
             "unds_por_estiba": _num(item, "unds_por_estiba", 1),
+            "meta_pedido": _num(item, "meta_pedido", 0, minimo_excl=-1.0),  # 0 = sin meta
         })
     return limpio
 

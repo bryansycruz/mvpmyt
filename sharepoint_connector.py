@@ -10,10 +10,12 @@ Funciones públicas:
     leer_datos()              -> pd.DataFrame   (hoja `Registros`)
     guardar_datos(df)         -> None           (preserva la hoja de salidas)
     leer_salidas()            -> pd.DataFrame   (hoja `Salidas_almacen`)
-    guardar_salidas(df)       -> None           (preserva la hoja de registros)
+    guardar_salidas(df)       -> None           (preserva las demás hojas)
+    leer_entradas()           -> pd.DataFrame   (hoja `Entradas_almacen`)
+    guardar_entradas(df)      -> None           (preserva las demás hojas)
 
-El libro tiene DOS hojas; cada guardado reescribe el archivo completo, así que
-siempre se escriben AMBAS (si no, se perdería la otra hoja).
+El libro tiene TRES hojas; cada guardado reescribe el archivo completo, así que
+siempre se escriben las tres (si no, se perderían las otras).
 
 Las credenciales se leen de st.secrets (.streamlit/secrets.toml).
 """
@@ -38,15 +40,17 @@ ARCHIVO_LOCAL = os.path.join(os.path.dirname(__file__), "datos_mamposteria_local
 from data_schema import (
     COLUMNAS, normalizar, df_vacio,
     normalizar_salidas, df_vacio_salidas,
+    normalizar_entradas, df_vacio_entradas,
 )
 
 # Aliases internos para mantener el resto del módulo sin cambios.
 _normalizar = normalizar
 _df_vacio = df_vacio
 
-# Hojas del libro: registros de pega + salidas de almacén (vales de bloque).
+# Hojas del libro: registros de pega + salidas + entradas de almacén.
 HOJA_REGISTROS = "Registros"
 HOJA_SALIDAS = "Salidas_almacen"
+HOJA_ENTRADAS = "Entradas_almacen"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -165,21 +169,25 @@ def _sin_timezone(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _escribir_libro(registros: pd.DataFrame, salidas: pd.DataFrame) -> bytes:
-    """Serializa el libro COMPLETO (ambas hojas) a bytes de Excel."""
+def _escribir_libro(registros: pd.DataFrame, salidas: pd.DataFrame,
+                    entradas: pd.DataFrame) -> bytes:
+    """Serializa el libro COMPLETO (las tres hojas) a bytes de Excel."""
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         _sin_timezone(_normalizar(registros)).to_excel(
             writer, index=False, sheet_name=HOJA_REGISTROS)
         _sin_timezone(normalizar_salidas(salidas)).to_excel(
             writer, index=False, sheet_name=HOJA_SALIDAS)
+        _sin_timezone(normalizar_entradas(entradas)).to_excel(
+            writer, index=False, sheet_name=HOJA_ENTRADAS)
     buffer.seek(0)
     return buffer.read()
 
 
-def _guardar_libro(registros: pd.DataFrame, salidas: pd.DataFrame) -> None:
-    """Reescribe el archivo (local o SharePoint) con AMBAS hojas."""
-    contenido = _escribir_libro(registros, salidas)
+def _guardar_libro(registros: pd.DataFrame, salidas: pd.DataFrame,
+                   entradas: pd.DataFrame) -> None:
+    """Reescribe el archivo (local o SharePoint) con las TRES hojas."""
+    contenido = _escribir_libro(registros, salidas, entradas)
     if modo_local():
         with open(ARCHIVO_LOCAL, "wb") as f:
             f.write(contenido)
@@ -208,14 +216,26 @@ def leer_salidas() -> pd.DataFrame:
     return _leer_hoja_sharepoint(HOJA_SALIDAS, normalizar_salidas, df_vacio_salidas)
 
 
+def leer_entradas() -> pd.DataFrame:
+    """Lee la hoja `Entradas_almacen` (remisiones de compra) normalizada."""
+    if modo_local():
+        return _leer_hoja_local(HOJA_ENTRADAS, normalizar_entradas, df_vacio_entradas)
+    return _leer_hoja_sharepoint(HOJA_ENTRADAS, normalizar_entradas, df_vacio_entradas)
+
+
 def guardar_datos(df: pd.DataFrame) -> None:
     """
-    Sube el histórico completo de registros. Lee primero la hoja de salidas
-    para reescribirla intacta (el guardado reemplaza el archivo entero).
+    Sube el histórico completo de registros. Lee primero las otras hojas
+    para reescribirlas intactas (el guardado reemplaza el archivo entero).
     """
-    _guardar_libro(df, leer_salidas())
+    _guardar_libro(df, leer_salidas(), leer_entradas())
 
 
 def guardar_salidas(df_salidas: pd.DataFrame) -> None:
-    """Sube las salidas de almacén completas, preservando los registros."""
-    _guardar_libro(leer_datos(), df_salidas)
+    """Sube las salidas de almacén completas, preservando las demás hojas."""
+    _guardar_libro(leer_datos(), df_salidas, leer_entradas())
+
+
+def guardar_entradas(df_entradas: pd.DataFrame) -> None:
+    """Sube las entradas de almacén completas, preservando las demás hojas."""
+    _guardar_libro(leer_datos(), leer_salidas(), df_entradas)

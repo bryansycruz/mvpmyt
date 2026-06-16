@@ -96,3 +96,39 @@ def normalizar_salidas(df: pd.DataFrame) -> pd.DataFrame:
     df["Timestamp_registro"] = pd.to_datetime(df["Timestamp_registro"], errors="coerce")
     df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce")
     return df
+
+
+# ─────────────────────────────────────────────────────────────
+# Entradas de almacén (compras recibidas del proveedor)
+# ─────────────────────────────────────────────────────────────
+# Una fila por remisión de entrada (lo que el almacén recibe del proveedor),
+# centraliza lo que antes vivía en el Excel "Control ladrillo". `Cantidad`
+# SIEMPRE en unidades reales (ladrillos contados); las estibas se guardan
+# aparte como dato logístico:
+#   Estibas_ing  — estibas (pallets) que llegaron en la remisión.
+#   Estibas_dev  — estibas (pallets vacíos) devueltas al proveedor; NO
+#                  descuentan ladrillos, son control de pallets.
+# El ACUMULADO no se guarda: se calcula al vuelo (evita desincronizarse).
+COLUMNAS_ENTRADAS = [
+    "Fecha", "Tipo_bloque", "Cantidad", "Estibas_ing", "Estibas_dev",
+    "No_remision", "Proveedor", "Observaciones", "Timestamp_registro",
+]
+
+
+def df_vacio_entradas() -> pd.DataFrame:
+    """DataFrame vacío con todas las columnas del esquema de entradas."""
+    return pd.DataFrame(columns=COLUMNAS_ENTRADAS)
+
+
+def normalizar_entradas(df: pd.DataFrame) -> pd.DataFrame:
+    """Garantiza columnas y tipos del esquema de entradas de almacén."""
+    for col in COLUMNAS_ENTRADAS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    df = df[COLUMNAS_ENTRADAS].copy()
+
+    df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
+    df["Timestamp_registro"] = pd.to_datetime(df["Timestamp_registro"], errors="coerce")
+    for col in ("Cantidad", "Estibas_ing", "Estibas_dev"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df

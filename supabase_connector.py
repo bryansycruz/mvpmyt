@@ -9,8 +9,10 @@ Lectura y escritura del histórico de mampostería en una tabla de Supabase
     leer_datos()              -> pd.DataFrame
     insertar_registros(df)    -> None   (append eficiente: solo filas nuevas)
     guardar_datos(df)         -> None   (reemplaza TODO el histórico; migraciones)
-    leer_salidas()            -> pd.DataFrame  (vales de almacén)
+    leer_salidas()            -> pd.DataFrame  (vales de salida de almacén)
     insertar_salidas(df)      -> None   (append de salidas de almacén)
+    leer_entradas()           -> pd.DataFrame  (remisiones de entrada de almacén)
+    insertar_entradas(df)     -> None   (append de entradas de almacén)
 
 Credenciales en st.secrets (.streamlit/secrets.toml):
 
@@ -27,11 +29,13 @@ import streamlit as st
 from data_schema import (
     COLUMNAS, COLUMNAS_FECHA, df_vacio, normalizar,
     COLUMNAS_SALIDAS, df_vacio_salidas, normalizar_salidas,
+    COLUMNAS_ENTRADAS, df_vacio_entradas, normalizar_entradas,
 )
 
 TABLA_POR_DEFECTO = "registros_mamposteria"
 TABLA_CONFIG_POR_DEFECTO = "config_app"     # tabla clave-valor de configuración
 TABLA_SALIDAS_POR_DEFECTO = "almacen_salidas"   # vales de salida de bloque
+TABLA_ENTRADAS_POR_DEFECTO = "almacen_entradas"  # remisiones de entrada de bloque
 
 
 # ─────────────────────────────────────────────────────────────
@@ -76,6 +80,14 @@ def _nombre_tabla_salidas() -> str:
         return valor or TABLA_SALIDAS_POR_DEFECTO
     except Exception:
         return TABLA_SALIDAS_POR_DEFECTO
+
+
+def _nombre_tabla_entradas() -> str:
+    try:
+        valor = str(st.secrets["SUPABASE_TABLE_ENTRADAS"]).strip()
+        return valor or TABLA_ENTRADAS_POR_DEFECTO
+    except Exception:
+        return TABLA_ENTRADAS_POR_DEFECTO
 
 
 @st.cache_resource(show_spinner=False)
@@ -186,6 +198,30 @@ def insertar_salidas(df_nuevas: pd.DataFrame) -> None:
                              normalizador=normalizar_salidas)
     cliente = _cliente()
     cliente.table(_nombre_tabla_salidas()).insert(registros).execute()
+
+
+# ─────────────────────────────────────────────────────────────
+# Entradas de almacén (remisiones de compra, tabla `almacen_entradas`)
+# ─────────────────────────────────────────────────────────────
+def leer_entradas() -> pd.DataFrame:
+    """Descarga todas las entradas de almacén como DataFrame normalizado."""
+    cliente = _cliente()
+    resp = (cliente.table(_nombre_tabla_entradas())
+            .select(",".join(f'"{c}"' for c in COLUMNAS_ENTRADAS)).execute())
+    datos = resp.data or []
+    if not datos:
+        return df_vacio_entradas()
+    return normalizar_entradas(pd.DataFrame(datos))
+
+
+def insertar_entradas(df_nuevas: pd.DataFrame) -> None:
+    """Inserta SOLO las entradas nuevas (append)."""
+    if df_nuevas is None or df_nuevas.empty:
+        return
+    registros = _a_registros(df_nuevas, columnas=COLUMNAS_ENTRADAS,
+                             normalizador=normalizar_entradas)
+    cliente = _cliente()
+    cliente.table(_nombre_tabla_entradas()).insert(registros).execute()
 
 
 # ─────────────────────────────────────────────────────────────

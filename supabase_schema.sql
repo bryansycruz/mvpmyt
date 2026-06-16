@@ -125,6 +125,28 @@ create table if not exists almacen_salidas (
 create index if not exists idx_salidas_fecha on almacen_salidas ("Fecha");
 create index if not exists idx_salidas_tipo  on almacen_salidas ("Tipo_bloque");
 
+-- Entradas de almacén (una remisión de compra por fila; Cantidad SIEMPRE en
+-- unidades reales recibidas. Estibas_ing/Estibas_dev son control de pallets y
+-- NO descuentan ladrillos. El acumulado se calcula en la app, no se guarda).
+-- Las restricciones van dentro del CREATE para que el script sea idempotente
+-- (un `alter table ... add constraint` fallaría si se corre dos veces).
+create table if not exists almacen_entradas (
+    id                      bigint generated always as identity primary key,
+    "Fecha"                 date not null,
+    "Tipo_bloque"           text not null,
+    "Cantidad"              double precision not null check ("Cantidad" > 0),
+    "Estibas_ing"           double precision check (coalesce("Estibas_ing", 0) >= 0),
+    "Estibas_dev"           double precision check (coalesce("Estibas_dev", 0) >= 0),
+    "No_remision"           text,
+    "Proveedor"             text,
+    "Observaciones"         text,
+    "Timestamp_registro"    timestamptz,
+    created_at              timestamptz default now()
+);
+
+create index if not exists idx_entradas_fecha on almacen_entradas ("Fecha");
+create index if not exists idx_entradas_tipo  on almacen_entradas ("Tipo_bloque");
+
 -- Config nueva del módulo de desperdicio (si faltan, la app usa sus defectos):
 --   umbral_desperdicio_pct → semáforo de la conciliación (verde ≤ umbral)
 --   factor_ajuste_bloques  → multiplica el teórico en la conciliación para
@@ -179,6 +201,8 @@ alter table almacen_salidas
 -- drop policy if exists "insercion_mvp"             on registros_mamposteria;
 -- drop policy if exists "salidas_lectura_mvp"       on almacen_salidas;
 -- drop policy if exists "salidas_insercion_mvp"     on almacen_salidas;
+-- drop policy if exists "entradas_lectura_mvp"      on almacen_entradas;
+-- drop policy if exists "entradas_insercion_mvp"    on almacen_entradas;
 -- drop policy if exists "config_lectura_mvp"        on config_app;
 -- drop policy if exists "config_insercion_mvp"      on config_app;
 -- drop policy if exists "config_actualizacion_mvp"  on config_app;

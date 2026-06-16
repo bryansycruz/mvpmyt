@@ -6,6 +6,9 @@ api_key.txt
 # Datos de prueba en modo local
 datos_mamposteria_local.xlsx
 
+# Datos internos de obra (no se publican en el repo)
+Control ladrillo.xlsx
+
 # Documentación interna de obra (no se publica en el repo)
 README_DESPERDICIO.md
 docs/context.txt
@@ -27,6 +30,9 @@ __pycache__/
 
 # Archivos temporales de Office
 ~$*
+
+# Logs de ejecución (pueden contener IPs/URLs internas)
+*.log
 
 # Sistema
 .DS_Store

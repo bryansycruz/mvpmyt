@@ -19,9 +19,12 @@ import streamlit as st
 from data_backend import (
     leer_datos, agregar_registros, estado,
     leer_config, guardar_config, config_persistente,
-    leer_salidas, agregar_salidas, leer_catalogo, guardar_catalogo,
+    leer_salidas, agregar_salidas,
+    leer_entradas, agregar_entradas,
+    leer_catalogo, guardar_catalogo,
+    leer_valores_ocultos, guardar_valores_ocultos,
 )
-from data_schema import COLUMNAS_SALIDAS
+from data_schema import COLUMNAS_SALIDAS, COLUMNAS_ENTRADAS
 from calculos import (
     TEORICO_SAC_M2, KG_POR_SACO,
     UMBRAL_DESPERDICIO_PCT, FACTOR_AJUSTE_BLOQUES,
@@ -90,9 +93,19 @@ def cargar_salidas_cached() -> pd.DataFrame:
     return leer_salidas()
 
 
+@st.cache_data(ttl=60, show_spinner="Cargando entradas de almacén…")
+def cargar_entradas_cached() -> pd.DataFrame:
+    return leer_entradas()
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def cargar_catalogo_cached() -> list:
     return leer_catalogo()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cargar_ocultos_cached() -> dict:
+    return leer_valores_ocultos()
 
 
 def cargar_datos_estado():
@@ -115,6 +128,18 @@ def opciones_unicas(df: pd.DataFrame, columna: str) -> list:
     if df.empty or columna not in df.columns:
         return []
     return sorted(df[columna].dropna().astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist())
+
+
+def _ocultos() -> dict:
+    """Mapa de valores ocultos por columna, cargado en la sesión."""
+    return st.session_state.get("valores_ocultos") or {}
+
+
+def opciones_visibles(df: pd.DataFrame, columna: str) -> list:
+    """Como `opciones_unicas`, pero sin los valores que el usuario ocultó de la
+    lista (los que ya no se usan). El historial no se toca: solo el desplegable."""
+    ocultos = set(_ocultos().get(columna, []))
+    return [v for v in opciones_unicas(df, columna) if v not in ocultos]
 
 
 def campo_con_nuevo(label: str, opciones: list, key: str, opcional: bool = False) -> str:
@@ -271,6 +296,73 @@ def barra_kpi_global(df: pd.DataFrame):
     st.divider()
 
 
+# Columnas de llenado libre cuyas listas se pueden limpiar (ocultar valores que
+# ya no se usan). Clave = columna del esquema; valor = etiqueta para el usuario.
+_COLUMNAS_LISTAS = {
+    "Oficial": "Oficiales",
+    "Ayudante": "Ayudantes",
+    "Piso": "Pisos",
+    "Sector": "Sectores",
+}
+
+
+def _guardar_ocultos(ocultos: dict) -> None:
+    """Persiste el mapa de ocultos, refresca la sesión y vuelve a dibujar."""
+    try:
+        guardar_valores_ocultos(ocultos)
+        cargar_ocultos_cached.clear()
+        st.session_state["valores_ocultos"] = leer_valores_ocultos()
+    except Exception as e:
+        st.error(f"No se pudo guardar: {e}")
+        return
+    st.toast("Lista actualizada ✅")
+    st.rerun()
+
+
+def _panel_limpiar_listas(df: pd.DataFrame) -> None:
+    """Quitar/restaurar valores de las listas de autocompletado (oficiales que ya
+    no vienen, pisos viejos, sectores, etc.). Ocultar NO borra el historial."""
+    with st.expander("🧹 Limpiar listas (oficiales, ayudantes, pisos, sectores)"):
+        if not config_persistente():
+            st.info(
+                "Para ocultar valores de forma permanente se necesita **Supabase**. "
+                "Con SharePoint o el modo local las listas quedan completas."
+            )
+            return
+        st.caption(
+            "Quita de los desplegables los valores que ya no se usan (p. ej. un "
+            "mampostero que no volvió). **No borra el historial ni los reportes**: "
+            "solo lo saca de la lista al digitar, y lo puedes restaurar cuando quieras."
+        )
+        etiquetas = {v: k for k, v in _COLUMNAS_LISTAS.items()}
+        etiqueta = st.selectbox("Lista", list(_COLUMNAS_LISTAS.values()),
+                                key="limpiar_lista")
+        col = etiquetas[etiqueta]
+
+        ocultos = {k: list(v) for k, v in _ocultos().items()}   # copia editable
+        ocultos_col = set(ocultos.get(col, []))
+        todos = opciones_unicas(df, col)              # todos los del historial
+        activos = [v for v in todos if v not in ocultos_col]
+
+        c1, c2 = st.columns(2)
+        with c1:
+            quitar = st.multiselect(f"Quitar de «{etiqueta}»", activos,
+                                    key=f"quitar_{col}")
+            if st.button("➖ Quitar", key=f"btn_quitar_{col}", disabled=not quitar):
+                ocultos[col] = sorted(ocultos_col | set(quitar))
+                _guardar_ocultos(ocultos)
+        with c2:
+            restaurar = st.multiselect(f"Restaurar a «{etiqueta}»", sorted(ocultos_col),
+                                       key=f"restaurar_{col}")
+            if st.button("↩️ Restaurar", key=f"btn_restaurar_{col}",
+                         disabled=not restaurar):
+                ocultos[col] = sorted(ocultos_col - set(restaurar))
+                _guardar_ocultos(ocultos)
+
+        if ocultos_col:
+            st.caption(f"**Ocultos en {etiqueta.lower()}:** " + ", ".join(sorted(ocultos_col)))
+
+
 # ─────────────────────────────────────────────────────────────
 # Pantalla 1 — Ingreso de datos
 # ─────────────────────────────────────────────────────────────
@@ -281,19 +373,21 @@ def pagina_ingreso(df: pd.DataFrame):
     if "flash" in st.session_state:
         st.success(st.session_state.pop("flash"))
 
+    _panel_limpiar_listas(df)
+
     # "Versión" del formulario: las keys de TODOS los widgets llevan este número.
     # Al guardar se incrementa → todos los widgets nacen de nuevo, limpios.
     # (Borrar las keys de session_state NO basta: st.data_editor conserva su
     # estado en el navegador y la tabla de muros quedaba con los datos viejos.)
     n = st.session_state.setdefault("ingreso_nonce", 0)
 
-    oficiales = opciones_unicas(df, "Oficial")
-    ayudantes = opciones_unicas(df, "Ayudante")
-    pisos = opciones_unicas(df, "Piso")
-    ladrillos = opciones_unicas(df, "Tipo_ladrillo")
+    oficiales = opciones_visibles(df, "Oficial")
+    ayudantes = opciones_visibles(df, "Ayudante")
+    pisos = opciones_visibles(df, "Piso")
+    ladrillos = opciones_visibles(df, "Tipo_ladrillo")
     OTRO_SECTOR = "➕ Otro sector…"
     sectores = ["Torre", "Plataforma"] + [
-        s for s in opciones_unicas(df, "Sector") if s not in ("Torre", "Plataforma")
+        s for s in opciones_visibles(df, "Sector") if s not in ("Torre", "Plataforma")
     ] + [OTRO_SECTOR]
 
     # Fila 1 — Identificación
@@ -828,8 +922,168 @@ def _filtrar_fechas(df: pd.DataFrame, desde, hasta) -> pd.DataFrame:
     return out
 
 
-def _tab_registrar_salida(df: pd.DataFrame, df_sal: pd.DataFrame, nombres_bloques: list):
-    """Sub-pestaña: digitar vales de salida de almacén (en unidades o estibas)."""
+def _resumen_almacen(df_ent: pd.DataFrame, df_sal: pd.DataFrame,
+                     catalogo: list) -> pd.DataFrame:
+    """Tabla por tipo de bloque: recibido (entradas), entregado (salidas),
+    stock en almacén, meta del pedido y % del pedido recibido.
+
+    El stock = recibido − entregado es el inventario teórico que aún debería
+    estar en almacén. % pedido = recibido ÷ meta_pedido del catálogo."""
+    metas = {b["nombre"]: float(b.get("meta_pedido", 0) or 0) for b in catalogo}
+
+    def _suma_por_tipo(df):
+        if df is None or df.empty or "Tipo_bloque" not in df.columns:
+            return {}
+        s = df.copy()
+        s["Cantidad"] = pd.to_numeric(s["Cantidad"], errors="coerce")
+        return s.groupby("Tipo_bloque")["Cantidad"].sum().to_dict()
+
+    recibido = _suma_por_tipo(df_ent)
+    entregado = _suma_por_tipo(df_sal)
+
+    tipos = sorted(set(metas) | set(recibido) | set(entregado))
+    filas = []
+    for t in tipos:
+        rec = float(recibido.get(t, 0.0))
+        ent = float(entregado.get(t, 0.0))
+        meta = metas.get(t, 0.0)
+        if rec == 0 and ent == 0 and meta == 0:
+            continue  # tipo del catálogo sin movimiento ni meta: no aporta nada
+        filas.append({
+            "Tipo de bloque": t,
+            "Recibido": rec,
+            "Entregado": ent,
+            "Stock almacén": rec - ent,
+            "Meta pedido": meta,
+            "% pedido": (rec / meta) if meta > 0 else float("nan"),
+        })
+    return pd.DataFrame(filas)
+
+
+def _form_entrada(df_ent: pd.DataFrame, catalogo: list):
+    """Formulario de ENTRADA de almacén (compras recibidas del proveedor).
+
+    Centraliza lo que vivía en el Excel "Control ladrillo": cada remisión que
+    llega del proveedor, en unidades reales + estibas."""
+    nombres_bloques = [b["nombre"] for b in catalogo]
+    st.caption(
+        "Digita cada **remisión de entrada** (lo que llega del proveedor al "
+        "almacén). La **cantidad va en unidades reales** de ladrillo; las estibas "
+        "se guardan aparte como control de pallets. El acumulado, el stock y el "
+        "% del pedido se calculan solos."
+    )
+    if not nombres_bloques:
+        st.warning("El catálogo de bloques está vacío: pide al admin configurarlo abajo.")
+        return
+
+    proveedores = opciones_unicas(df_ent, "Proveedor")
+    with st.form("form_entrada"):
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            fecha_e = st.date_input("Fecha de la entrada *", value=datetime.now().date(),
+                                    key="ent_fecha")
+        with e2:
+            tipo_e = st.selectbox("Tipo de bloque *", nombres_bloques, key="ent_tipo")
+        with e3:
+            prov_e = st.text_input(
+                "Proveedor", key="ent_prov", placeholder="Ej: LAD SAN C",
+                help="Quién despacha el material. Se autocompleta con los ya usados: "
+                     + (", ".join(proveedores) if proveedores else "—"),
+            )
+        e4, e5, e6 = st.columns(3)
+        with e4:
+            cantidad_e = st.number_input("Cantidad (unidades) *", min_value=0.0,
+                                         step=1.0, format="%.0f", key="ent_cant")
+        with e5:
+            estibas_ing_e = st.number_input("Estibas ingresadas", min_value=0.0,
+                                            step=1.0, format="%.0f", key="ent_estibas")
+        with e6:
+            estibas_dev_e = st.number_input(
+                "Estibas devueltas", min_value=0.0, step=1.0, format="%.0f",
+                key="ent_estibasdev",
+                help="Pallets vacíos que se regresan al proveedor. NO descuentan "
+                     "ladrillos, son control de pallets.",
+            )
+        e7, e8 = st.columns(2)
+        with e7:
+            remision_e = st.text_input(
+                "# Remisión", key="ent_remision",
+                help="Número del documento de entrada (remisión). Evita digitar dos "
+                     "veces y permite auditar contra el proveedor.",
+            )
+        with e8:
+            obs_e = st.text_input("Observaciones", key="ent_obs")
+        enviar_e = st.form_submit_button("💾 Guardar entrada", type="primary")
+
+    if enviar_e:
+        errores = []
+        if cantidad_e <= 0:
+            errores.append("La **cantidad** debe ser mayor que 0.")
+        if estibas_dev_e > 0 and estibas_ing_e <= 0:
+            errores.append("Hay **estibas devueltas** pero 0 ingresadas: revisa el dato.")
+        # Una remisión ya digitada con el mismo tipo de bloque es un duplicado.
+        if remision_e.strip() and not df_ent.empty and "No_remision" in df_ent.columns:
+            ya = df_ent[
+                (df_ent["No_remision"].astype(str).str.strip() == remision_e.strip())
+                & (df_ent["Tipo_bloque"].astype(str).str.strip() == tipo_e)
+            ]
+            if not ya.empty:
+                errores.append(
+                    f"La remisión **{remision_e.strip()}** ya está digitada con "
+                    f"**{tipo_e}** (revisa el *Kardex* de abajo). Si trae otro tipo de "
+                    "bloque, digítala con ese otro tipo; si es otra remisión, corrige "
+                    "el número."
+                )
+        if errores:
+            for e in errores:
+                st.error(e)
+            return
+
+        # Guardia anti doble clic (cubre las entradas sin # remisión).
+        firma_e = repr((str(fecha_e), tipo_e, float(cantidad_e), float(estibas_ing_e),
+                        float(estibas_dev_e), remision_e.strip(), prov_e.strip(),
+                        obs_e.strip()))
+        ult_e = st.session_state.get("ultima_entrada_firma")
+        if ult_e and ult_e[0] == firma_e and datetime.now().timestamp() - ult_e[1] < 120:
+            st.warning(
+                "⚠️ Esta entrada es **idéntica** a la que se acaba de guardar — no se "
+                "guardó otra vez (posible doble clic)."
+            )
+            return
+
+        fila = pd.DataFrame([{
+            "Fecha": pd.to_datetime(fecha_e),
+            "Tipo_bloque": tipo_e,
+            "Cantidad": float(cantidad_e),
+            "Estibas_ing": float(estibas_ing_e) if estibas_ing_e > 0 else None,
+            "Estibas_dev": float(estibas_dev_e) if estibas_dev_e > 0 else None,
+            "No_remision": remision_e.strip(),
+            "Proveedor": prov_e.strip(),
+            "Observaciones": obs_e.strip(),
+            "Timestamp_registro": datetime.now(),
+        }])[COLUMNAS_ENTRADAS]
+        try:
+            with st.spinner("Guardando…"):
+                agregar_entradas(fila)
+            cargar_entradas_cached.clear()
+        except Exception as e:
+            st.error(f"No se pudo guardar la entrada: {e}")
+            return
+        ratio = (f" · {cantidad_e / estibas_ing_e:,.0f} und/estiba"
+                 if estibas_ing_e > 0 else "")
+        st.session_state["ultima_entrada_firma"] = (firma_e, datetime.now().timestamp())
+        st.session_state["flash_entrada"] = (
+            f"Entrada guardada · **{tipo_e}** · {cantidad_e:,.0f} unidades"
+            f"{f' · {estibas_ing_e:,.0f} estibas' if estibas_ing_e > 0 else ''}{ratio}."
+        )
+        for k in ("ent_fecha", "ent_tipo", "ent_prov", "ent_cant", "ent_estibas",
+                  "ent_estibasdev", "ent_remision", "ent_obs"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+
+def _form_salida(df: pd.DataFrame, df_sal: pd.DataFrame, nombres_bloques: list):
+    """Formulario de SALIDA de almacén (entrega a obra, en unidades o estibas)."""
     st.caption(
         "Digita cada **remisión** (el documento con el que el almacén registra cada "
         "salida de material). Nadie cuenta ladrillos pegados: el desperdicio sale de "
@@ -847,7 +1101,7 @@ def _tab_registrar_salida(df: pd.DataFrame, df_sal: pd.DataFrame, nombres_bloque
                                     key="sal_fecha")
         with v2:
             sectores_s = ["Torre", "Plataforma"] + [
-                s for s in opciones_unicas(df, "Sector") if s not in ("Torre", "Plataforma")
+                s for s in opciones_visibles(df, "Sector") if s not in ("Torre", "Plataforma")
             ]
             sector_s = st.selectbox("Sector *", sectores_s, key="sal_sector")
         with v3:
@@ -888,7 +1142,7 @@ def _tab_registrar_salida(df: pd.DataFrame, df_sal: pd.DataFrame, nombres_bloque
             if not ya.empty:
                 errores.append(
                     f"La remisión **{vale_s.strip()}** ya está digitada con "
-                    f"**{tipo_s}** (revisa *Últimas salidas*). Si la misma remisión "
+                    f"**{tipo_s}** (revisa el *Kardex* de abajo). Si la misma remisión "
                     "trae otro tipo de bloque, digítala con ese otro tipo; si es "
                     "otra remisión, corrige el número."
                 )
@@ -941,11 +1195,134 @@ def _tab_registrar_salida(df: pd.DataFrame, df_sal: pd.DataFrame, nombres_bloque
             st.session_state.pop(k, None)
         st.rerun()
 
-    if not df_sal.empty:
-        st.subheader("Últimas salidas")
-        ult = (df_sal.sort_values("Timestamp_registro", ascending=False).head(15)
-               .rename(columns={"No_vale": "# Remisión"}))
-        st.dataframe(preparar_display(ult), width="stretch")
+
+def _kardex(df_ent: pd.DataFrame, df_sal: pd.DataFrame, catalogo: list) -> pd.DataFrame:
+    """Combina entradas (+) y salidas (−) en una sola línea de tiempo con el
+    stock acumulado por tipo de bloque tras cada movimiento (estilo kardex)."""
+    und_estiba = {b["nombre"]: float(b.get("unds_por_estiba", 0) or 0) for b in catalogo}
+    partes = []
+
+    if df_ent is not None and not df_ent.empty:
+        e = df_ent.copy()
+        cant = pd.to_numeric(e["Cantidad"], errors="coerce")
+        ing = pd.to_numeric(e["Estibas_ing"], errors="coerce")
+        ref = e["Tipo_bloque"].map(und_estiba).fillna(0)
+        ratio = (cant / ing).where(ing > 0)
+        # ⚠️ si los lad/estiba se salen ±10 % de la estiba llena del catálogo:
+        # casi siempre es un error al digitar las estibas (como el 1.350÷8 del Excel).
+        alerta = [(r > 0 and pd.notna(lr) and (lr > r * 1.10 or lr < r * 0.80))
+                  for lr, r in zip(ratio, ref)]
+        partes.append(pd.DataFrame({
+            "Fecha": pd.to_datetime(e["Fecha"], errors="coerce"),
+            "Timestamp_registro": pd.to_datetime(e["Timestamp_registro"], errors="coerce"),
+            "Movimiento": "▲ Entrada",
+            "Tipo_bloque": e["Tipo_bloque"].astype(str),
+            "_signo": cant.fillna(0.0),
+            "Estibas": ing,
+            "Origen / Destino": [
+                (str(p).strip() or "—") + (" ⚠️" if a else "")
+                for p, a in zip(e["Proveedor"], alerta)
+            ],
+            "Remisión": e["No_remision"].astype(str),
+        }))
+
+    if df_sal is not None and not df_sal.empty:
+        s = df_sal.copy()
+        cant = pd.to_numeric(s["Cantidad"], errors="coerce")
+        destino = [
+            (str(sec).strip() or "—")
+            + (f" · piso {str(pi).strip()}" if str(pi).strip() and str(pi) != "nan" else "")
+            for sec, pi in zip(s["Sector"], s["Piso"])
+        ]
+        partes.append(pd.DataFrame({
+            "Fecha": pd.to_datetime(s["Fecha"], errors="coerce"),
+            "Timestamp_registro": pd.to_datetime(s["Timestamp_registro"], errors="coerce"),
+            "Movimiento": "▼ Salida",
+            "Tipo_bloque": s["Tipo_bloque"].astype(str),
+            "_signo": -cant.fillna(0.0),
+            "Estibas": pd.NA,
+            "Origen / Destino": destino,
+            "Remisión": s["No_vale"].astype(str),
+        }))
+
+    if not partes:
+        return pd.DataFrame()
+
+    k = pd.concat(partes, ignore_index=True)
+    # Acumular cronológicamente (asc) el stock por tipo; mostrar luego más reciente arriba.
+    k = k.sort_values(["Fecha", "Timestamp_registro"], na_position="first").reset_index(drop=True)
+    k["Stock"] = k.groupby("Tipo_bloque")["_signo"].cumsum()
+    k["Cantidad"] = k["_signo"]
+    k = k.sort_values(["Fecha", "Timestamp_registro"], ascending=False, na_position="last")
+    return k.drop(columns=["_signo"])
+
+
+def _tab_movimientos(df: pd.DataFrame, df_ent: pd.DataFrame, df_sal: pd.DataFrame,
+                     catalogo: list):
+    """Pestaña única de almacén: registrar entrada o salida (un solo lugar),
+    ver el stock por tipo y el kardex combinado de movimientos."""
+    nombres_bloques = [b["nombre"] for b in catalogo]
+    if not nombres_bloques:
+        st.warning("El catálogo de bloques está vacío: pide al admin configurarlo abajo.")
+        return
+
+    modo = st.radio("¿Qué vas a registrar?", ["📦 Entrada", "📥 Salida"],
+                    horizontal=True, key="mov_modo")
+    if modo == "📦 Entrada":
+        _form_entrada(df_ent, catalogo)
+    else:
+        _form_salida(df, df_sal, nombres_bloques)
+
+    # ── Stock en almacén y avance del pedido ──────────────────────
+    resumen = _resumen_almacen(df_ent, df_sal, catalogo)
+    if not resumen.empty:
+        st.divider()
+        st.subheader("📊 Stock en almacén y avance del pedido")
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("Recibido total", f"{resumen['Recibido'].sum():,.0f} und")
+        mc2.metric("Entregado a obra", f"{resumen['Entregado'].sum():,.0f} und")
+        mc3.metric("Stock en almacén", f"{resumen['Stock almacén'].sum():,.0f} und")
+        st.dataframe(
+            resumen.style.format({
+                "Recibido": "{:,.0f}", "Entregado": "{:,.0f}",
+                "Stock almacén": "{:,.0f}", "Meta pedido": "{:,.0f}",
+                "% pedido": "{:.0%}",
+            }, na_rep="—"),
+            width="stretch", hide_index=True,
+        )
+        st.caption(
+            "**Stock almacén = Recibido − Entregado** (inventario teórico que queda). "
+            "**% pedido** usa la meta por tipo del catálogo (admin). Stock negativo = "
+            "se entregó más de lo recibido: revisa entradas faltantes."
+        )
+
+    # ── Kardex: entradas y salidas combinadas ─────────────────────
+    kx = _kardex(df_ent, df_sal, catalogo)
+    if kx.empty:
+        return
+    st.divider()
+    st.subheader("📒 Kardex de movimientos")
+    tipos = ["Todos"] + sorted(kx["Tipo_bloque"].dropna().unique().tolist())
+    f1, _ = st.columns([1, 2])
+    with f1:
+        tipo_f = st.selectbox("Filtrar por tipo", tipos, key="kardex_tipo")
+    if tipo_f != "Todos":
+        kx = kx[kx["Tipo_bloque"] == tipo_f]
+    vista = kx.head(40).copy()
+    vista["Fecha"] = pd.to_datetime(vista["Fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
+    cols = ["Fecha", "Movimiento", "Tipo_bloque", "Cantidad", "Estibas",
+            "Origen / Destino", "Remisión", "Stock"]
+    st.dataframe(
+        vista[cols].style.format(
+            {"Cantidad": "{:+,.0f}", "Estibas": "{:,.0f}", "Stock": "{:,.0f}"},
+            na_rep="—"),
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        "▲ entra · ▼ sale. **Stock** = saldo del almacén para ese tipo después del "
+        "movimiento. **⚠️** en una entrada = los ladrillos por estiba se salen de lo "
+        "normal (posible error al digitar las estibas). Se muestran los 40 más recientes."
+    )
 
 
 def _tab_conciliacion(df: pd.DataFrame, df_sal: pd.DataFrame):
@@ -1096,6 +1473,10 @@ def _editor_catalogo(catalogo: list):
                                                          step=0.005, format="%.3f"),
                 "unds_por_estiba": st.column_config.NumberColumn("Und/estiba", min_value=1,
                                                                  step=1, format="%d"),
+                "meta_pedido": st.column_config.NumberColumn(
+                    "Meta pedido", min_value=0, step=1, format="%d",
+                    help="Total pedido del proyecto/torre para este tipo (0 = sin meta). "
+                         "Alimenta el % del pedido recibido en 📦 Registrar entrada."),
             },
         )
         if not config_persistente():
@@ -1120,6 +1501,8 @@ def pagina_materiales(df: pd.DataFrame):
 
     if "flash_salida" in st.session_state:
         st.success(st.session_state.pop("flash_salida"))
+    if "flash_entrada" in st.session_state:
+        st.success(st.session_state.pop("flash_entrada"))
 
     try:
         df_sal = cargar_salidas_cached()
@@ -1132,14 +1515,24 @@ def pagina_materiales(df: pd.DataFrame):
             st.code(str(e))
         return
 
-    catalogo = _catalogo()
-    nombres_bloques = [b["nombre"] for b in catalogo]
+    try:
+        df_ent = cargar_entradas_cached()
+    except Exception as e:
+        st.error(
+            "No se pudieron leer las entradas de almacén. Si usas Supabase, corre la "
+            "sección nueva de `supabase_schema.sql` (tabla `almacen_entradas`)."
+        )
+        with st.expander("Detalle técnico"):
+            st.code(str(e))
+        return
 
-    tab_reg, tab_conc, tab_graf = st.tabs(
-        ["📥 Registrar salida", "⚖️ Conciliación", "📈 Gráficas"]
+    catalogo = _catalogo()
+
+    tab_mov, tab_conc, tab_graf = st.tabs(
+        ["📦 Movimientos de almacén", "⚖️ Conciliación", "📈 Gráficas"]
     )
-    with tab_reg:
-        _tab_registrar_salida(df, df_sal, nombres_bloques)
+    with tab_mov:
+        _tab_movimientos(df, df_ent, df_sal, catalogo)
     with tab_conc:
         _tab_conciliacion(df, df_sal)
     with tab_graf:
@@ -1328,6 +1721,8 @@ def main():
     st.session_state["cfg"] = cargar_config_cached()
     # Catálogo de bloques (P.V./P.H.) para los bloques teóricos y las salidas.
     st.session_state["catalogo"] = cargar_catalogo_cached()
+    # Valores ocultos de las listas (oficiales/ayudantes/pisos/sectores retirados).
+    st.session_state["valores_ocultos"] = cargar_ocultos_cached()
 
     with st.sidebar:
         st.markdown("## 🧱 Control\nMampostería")

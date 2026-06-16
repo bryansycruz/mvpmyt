@@ -19,6 +19,8 @@ Interfaz pública:
     guardar_datos(df)              # reemplaza todo (migraciones)
     leer_salidas()      -> df      # vales de salida de almacén (bloques)
     agregar_salidas(df_nuevas)     # append de salidas
+    leer_entradas()     -> df      # remisiones de entrada de almacén (compras)
+    agregar_entradas(df_nuevas)    # append de entradas
     leer_catalogo()     -> list    # catálogo de bloques (P.V./P.H.)
     guardar_catalogo(lista)        # persiste el catálogo (solo Supabase)
     backend_actual()    -> "supabase" | "sharepoint" | "local"
@@ -41,7 +43,10 @@ import supabase_connector as sb
 
 __all__ = [
     "COLUMNAS", "leer_datos", "agregar_registros", "guardar_datos",
-    "leer_salidas", "agregar_salidas", "leer_catalogo", "guardar_catalogo",
+    "leer_salidas", "agregar_salidas",
+    "leer_entradas", "agregar_entradas",
+    "leer_catalogo", "guardar_catalogo",
+    "leer_valores_ocultos", "guardar_valores_ocultos",
     "backend_actual", "estado", "modo_local",
     "leer_config", "guardar_config", "config_persistente", "CONFIG_DEFECTOS",
 ]
@@ -59,6 +64,10 @@ CONFIG_DEFECTOS = {
 
 # Clave de la tabla config_app donde se guarda el catálogo de bloques (JSON).
 _CLAVE_CATALOGO = "catalogo_bloques"
+
+# Clave donde se guardan los valores ocultos de las listas de autocompletado
+# (oficiales, ayudantes, pisos, sectores que ya no se usan), por columna.
+_CLAVE_VALORES_OCULTOS = "valores_ocultos"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -168,6 +177,29 @@ def agregar_salidas(df_nuevas: pd.DataFrame) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+# Entradas de almacén (remisiones de compra, para el stock y el pedido)
+# ─────────────────────────────────────────────────────────────
+def leer_entradas() -> pd.DataFrame:
+    if backend_actual() == "supabase":
+        return sb.leer_entradas()
+    return sp.leer_entradas()   # cubre SharePoint y Excel local
+
+
+def agregar_entradas(df_nuevas: pd.DataFrame) -> None:
+    """Añade remisiones nuevas de entrada de almacén (mismo patrón que salidas)."""
+    if df_nuevas is None or df_nuevas.empty:
+        return
+
+    if backend_actual() == "supabase":
+        sb.insertar_entradas(df_nuevas)
+        return
+
+    actual = sp.leer_entradas()
+    nuevo = pd.concat([actual, df_nuevas], ignore_index=True)
+    sp.guardar_entradas(nuevo)
+
+
+# ─────────────────────────────────────────────────────────────
 # Catálogo de bloques (P.V./P.H.) — JSON en config_app (solo Supabase)
 # ─────────────────────────────────────────────────────────────
 def leer_catalogo() -> list:
@@ -195,6 +227,42 @@ def guardar_catalogo(lista: list) -> None:
     if not limpio:
         raise ValueError("El catálogo no puede quedar vacío: revisa los nombres y medidas.")
     sb.guardar_config_raw({_CLAVE_CATALOGO: json.dumps(limpio, ensure_ascii=False)})
+
+
+# ─────────────────────────────────────────────────────────────
+# Valores ocultos de las listas de autocompletado (por columna)
+# ─────────────────────────────────────────────────────────────
+def leer_valores_ocultos() -> dict:
+    """Valores ocultos de las listas de autocompletado, por columna:
+    {"Oficial": [...], "Ayudante": [...], "Piso": [...], "Sector": [...]}.
+
+    Ocultar NO borra el historial: solo saca el valor de los desplegables al
+    digitar. Solo persiste con Supabase; con otros backends devuelve {}."""
+    if backend_actual() != "supabase":
+        return {}
+    try:
+        crudo = sb.leer_config_raw().get(_CLAVE_VALORES_OCULTOS)
+        if crudo:
+            data = json.loads(crudo)
+            if isinstance(data, dict):
+                return {str(k): [str(v) for v in (vs or [])]
+                        for k, vs in data.items()}
+    except Exception:
+        pass   # tabla/clave inexistente o JSON corrupto → nada oculto
+    return {}
+
+
+def guardar_valores_ocultos(data: dict) -> None:
+    """Persiste el mapa de valores ocultos (solo Supabase). Normaliza a listas
+    únicas y ordenadas, descartando vacíos y columnas sin valores."""
+    if not config_persistente():
+        raise RuntimeError("Ocultar valores de las listas requiere Supabase.")
+    limpio = {}
+    for col, valores in (data or {}).items():
+        vals = sorted({str(v).strip() for v in (valores or []) if str(v).strip()})
+        if vals:
+            limpio[str(col)] = vals
+    sb.guardar_config_raw({_CLAVE_VALORES_OCULTOS: json.dumps(limpio, ensure_ascii=False)})
 
 
 # ─────────────────────────────────────────────────────────────
