@@ -704,10 +704,10 @@ def pagina_registros(df: pd.DataFrame):
 
 
 # ─────────────────────────────────────────────────────────────
-# Pantalla 3 — Gráficas
+# Pantalla 3 — Control
 # ─────────────────────────────────────────────────────────────
 def pagina_graficas(df: pd.DataFrame):
-    st.header("📈 Gráficas")
+    st.header("📈 Control")
 
     if df.empty:
         st.info("Aún no hay datos para graficar.")
@@ -728,32 +728,100 @@ def pagina_graficas(df: pd.DataFrame):
 
     st.divider()
 
-    # Gráfica 1 y 2
-    g1, g2 = st.columns(2)
+    # ═══════════ Capítulo: Metros cuadrados (m²) ═══════════
+    st.subheader("Metros cuadrados (m²)")
 
-    with g1:
-        oficiales_m2 = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
-        sel_m2 = st.multiselect(
-            "Mamposteros a mostrar", oficiales_m2, default=oficiales_m2,
-            key="graf_oficiales_m2",
-            help="Deja solo los mamposteros que quieras comparar (uno o varios).",
+    oficiales_m2 = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
+    sel_m2 = st.multiselect(
+        "Mamposteros a mostrar", oficiales_m2, default=oficiales_m2,
+        key="graf_oficiales_m2",
+        help="Deja solo los mamposteros que quieras comparar (uno o varios).",
+    )
+    por_oficial_m2 = (
+        df[df["Oficial"].isin(sel_m2)]
+        .groupby("Oficial", as_index=False)["M2_ejecutados"].sum()
+        .sort_values("M2_ejecutados", ascending=False)
+    )
+    if por_oficial_m2.empty:
+        st.info("Selecciona al menos un mampostero para ver la gráfica.")
+    else:
+        fig1 = px.bar(
+            por_oficial_m2, x="Oficial", y="M2_ejecutados",
+            title="M² ejecutados por oficial", color_discrete_sequence=["#2980b9"],
         )
-        por_oficial_m2 = (
-            df[df["Oficial"].isin(sel_m2)]
-            .groupby("Oficial", as_index=False)["M2_ejecutados"].sum()
-            .sort_values("M2_ejecutados", ascending=False)
-        )
-        if por_oficial_m2.empty:
-            st.info("Selecciona al menos un mampostero para ver la gráfica.")
-        else:
-            fig1 = px.bar(
-                por_oficial_m2, x="Oficial", y="M2_ejecutados",
-                title="M² ejecutados por oficial", color_discrete_sequence=["#2980b9"],
-            )
-            fig1.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
-            st.plotly_chart(fig1, width="stretch")
+        fig1.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
+        st.plotly_chart(fig1, width="stretch")
 
-    with g2:
+    # Evolución diaria (M² + nº de mamposteros), filtrable por mes/semana
+    MESES_EVO = ["ene", "feb", "mar", "abr", "may", "jun",
+                 "jul", "ago", "sep", "oct", "nov", "dic"]
+    df_evo = df.dropna(subset=["Fecha"]).copy()
+    por_dia = None
+    if df_evo.empty:
+        st.info("Aún no hay registros con fecha para la evolución diaria.")
+    else:
+        fc1, fc2 = st.columns([1, 2])
+        with fc1:
+            modo_evo = st.radio("Ver evolución", ["Todo", "Por mes", "Por semana"],
+                                horizontal=True, key="evo_modo")
+        if modo_evo == "Por mes":
+            df_evo["_per"] = df_evo["Fecha"].dt.to_period("M")
+            opts = sorted(df_evo["_per"].unique(), reverse=True)
+            with fc2:
+                sel = st.selectbox(
+                    "Mes", opts, key="evo_mes",
+                    format_func=lambda p: f"{MESES_EVO[p.month - 1]} {p.year}")
+            df_evo = df_evo[df_evo["_per"] == sel]
+        elif modo_evo == "Por semana":
+            df_evo["_per"] = df_evo["Fecha"].dt.to_period("W")
+            opts = sorted(df_evo["_per"].unique(), reverse=True)
+            with fc2:
+                sel = st.selectbox(
+                    "Semana", opts, key="evo_sem",
+                    format_func=lambda p: f"{p.start_time:%d/%m} – {p.end_time:%d/%m/%Y}")
+            df_evo = df_evo[df_evo["_per"] == sel]
+
+        df_evo["Día"] = df_evo["Fecha"].dt.date
+        por_dia = (
+            df_evo.groupby("Día", as_index=False)
+            .agg(M2_ejecutados=("M2_ejecutados", "sum"),
+                 Mamposteros=("Oficial", "nunique"))
+            .sort_values("Día")
+        )
+
+    if por_dia is not None and not por_dia.empty:
+        # Eje X como TEXTO de fecha (dd/mm/aaaa): con pocos días Plotly metía marcas
+        # con horas (confuso). Como categoría de texto, nunca muestra la hora.
+        por_dia["DíaTxt"] = [d.strftime("%d/%m/%Y") for d in por_dia["Día"]]
+        # M² como línea (eje izq.) y nº de mamposteros como barras suaves (eje der.).
+        fig3 = go.Figure()
+        fig3.add_trace(go.Bar(
+            x=por_dia["DíaTxt"], y=por_dia["Mamposteros"], name="Mamposteros",
+            marker_color="#aed6f1", opacity=0.6, yaxis="y2",
+            hovertemplate="%{x}<br>Mamposteros: %{y}<extra></extra>",
+        ))
+        fig3.add_trace(go.Scatter(
+            x=por_dia["DíaTxt"], y=por_dia["M2_ejecutados"], name="M² ejecutados",
+            mode="lines+markers", line=dict(color="#2980b9"),
+            hovertemplate="%{x}<br>M²: %{y:.1f}<extra></extra>",
+        ))
+        fig3.update_layout(
+            title="Evolución diaria: M² ejecutados y nº de mamposteros",
+            xaxis_title="",
+            yaxis=dict(title="M² ejecutados"),
+            yaxis2=dict(title="Mamposteros", overlaying="y", side="right",
+                        showgrid=False, rangemode="tozero", dtick=1),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="right", x=1),
+        )
+        st.plotly_chart(fig3, width="stretch")
+
+    st.divider()
+    # ═══════════ Capítulo: Sacos y mortero ═══════════
+    st.subheader("Sacos y mortero")
+    cm1, cm2 = st.columns(2)
+
+    with cm1:
         meta = _meta()
         # Filtro directo por nombre: quitar a un mampostero de poco volumen (cuyo
         # consumo sacos÷m² se dispara) reajusta la escala y deja ver a los demás.
@@ -786,27 +854,7 @@ def pagina_graficas(df: pd.DataFrame):
             fig2.update_layout(xaxis_title="", yaxis_title="Consumo (sac/m²)", legend_title="")
             st.plotly_chart(fig2, width="stretch")
 
-    # Gráfica 3 — evolución diaria
-    por_dia = (
-        df.dropna(subset=["Fecha"])
-        .groupby(df["Fecha"].dt.date, as_index=False)["M2_ejecutados"].sum()
-        .rename(columns={"Fecha": "Día"})
-    )
-    if not por_dia.empty:
-        por_dia.columns = ["Día", "M2_ejecutados"]
-        fig3 = px.line(
-            por_dia, x="Día", y="M2_ejecutados", markers=True,
-            title="Evolución diaria de M² ejecutados",
-        )
-        fig3.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
-        st.plotly_chart(fig3, width="stretch")
-
-    # Gráficas de sacos — el total va en la primera fila de cada grupo y cada
-    # grupo tiene un único Oficial/Piso/Zona, así que groupby().sum() no duplica.
-    st.subheader("Consumo de sacos")
-    gs1, gs2 = st.columns(2)
-
-    with gs1:
+    with cm2:
         oficiales_sacos = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
         sel_sacos = st.multiselect(
             "Mamposteros a mostrar", oficiales_sacos, default=oficiales_sacos,
@@ -829,27 +877,28 @@ def pagina_graficas(df: pd.DataFrame):
             figs1.update_layout(xaxis_title="", yaxis_title="Sacos")
             st.plotly_chart(figs1, width="stretch")
 
-    with gs2:
-        dim = st.selectbox(
-            "Agrupar sacos por", ["Piso", "Zona", "Sector"], key="graf_sacos_dim",
-            help="Elige la dimensión para ver dónde se gastaron los sacos.",
-        )
-        base_dim = df.copy()
-        base_dim[dim] = base_dim[dim].fillna("").astype(str).str.strip()
-        base_dim.loc[base_dim[dim] == "", dim] = "(sin dato)"
-        sacos_dim = (
-            base_dim.groupby(dim, as_index=False)["Num_sacos"].sum()
-            .sort_values("Num_sacos", ascending=False)
-        )
-        figs2 = px.bar(
-            sacos_dim, x=dim, y="Num_sacos",
-            title=f"Sacos consumidos por {dim.lower()}",
-            color_discrete_sequence=["#16a085"],
-        )
-        figs2.update_layout(xaxis_title="", yaxis_title="Sacos")
-        st.plotly_chart(figs2, width="stretch")
+    dim = st.selectbox(
+        "Agrupar sacos por", ["Piso", "Zona", "Sector"], key="graf_sacos_dim",
+        help="Elige la dimensión para ver dónde se gastaron los sacos.",
+    )
+    base_dim = df.copy()
+    base_dim[dim] = base_dim[dim].fillna("").astype(str).str.strip()
+    base_dim.loc[base_dim[dim] == "", dim] = "(sin dato)"
+    sacos_dim = (
+        base_dim.groupby(dim, as_index=False)["Num_sacos"].sum()
+        .sort_values("Num_sacos", ascending=False)
+    )
+    figs2 = px.bar(
+        sacos_dim, x=dim, y="Num_sacos",
+        title=f"Sacos consumidos por {dim.lower()}",
+        color_discrete_sequence=["#16a085"],
+    )
+    figs2.update_layout(xaxis_title="", yaxis_title="Sacos")
+    st.plotly_chart(figs2, width="stretch")
 
-    # Gráfica 4 — Presencia de mamposteros (primer→último día + estado)
+    st.divider()
+
+    # ═══════════ Capítulo: Presencia de mamposteros ═══════════
     st.subheader("Presencia de mamposteros")
     st.caption(
         "Cada barra va del **primer** al **último** día con registro de cada oficial. "
@@ -989,48 +1038,43 @@ def pagina_cierres(df: pd.DataFrame):
         s2.metric("🟦 M² Plataforma (semana)", f"{_m2_sector(del_sem, 'Plataforma'):,.1f} m²")
         s3.metric("📌 M² Total (semana)", f"{del_sem['M2_ejecutados'].sum():,.1f} m²")
 
-        st.subheader("Cuánto hizo cada mampostero")
+        # Base por mampostero (alimenta metas y el detalle de abajo).
         cierre = resumen_por(
             del_sem, "Oficial",
             extra={"Dias": ("Fecha", lambda s: s.dt.date.nunique())},
         )
 
-        styler = estilar_consumo(cierre.style, columna="Consumo_promedio").format(
-            {"M2_total": "{:.1f}", "Sacos_total": "{:.1f}",
-             "Consumo_promedio": "{:.3f}", "Pct_cumple": "{:.0f}%"}
-        )
-        st.dataframe(styler, width="stretch")
-        st.caption("Los M² se atribuyen al **oficial**; el ayudante queda registrado pero no suma m² aparte.")
+        # Metas: por defecto (800 m²/piso, 10 m²/día). Van en un expander colapsado
+        # para que el residente no se confunda con campos editables entre resultados.
+        with st.expander("⚙️ Ajustar metas (ábrelo solo si hubo festivo o cambian)"):
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                meta_piso = st.number_input(
+                    "Meta por piso (m²/sem)", min_value=0.0, value=800.0, step=50.0,
+                    key="cs_meta_piso", help="Meta semanal de m² por cada piso.",
+                )
+            with mc2:
+                meta_dia = st.number_input(
+                    "Meta por mampostero (m²/día)", min_value=0.0, value=10.0, step=1.0,
+                    key="cs_meta_dia",
+                    help="Cada mampostero debe pegar este m² por día trabajado.",
+                )
+            with mc3:
+                dias_lab = st.number_input(
+                    "Días laborables esta semana", min_value=1, max_value=7, value=5,
+                    step=1, key="cs_dias_lab",
+                    help="Lun–Vie = 5. Bájalo si hubo festivo y la meta se ajusta.",
+                )
+            meta_of = meta_dia * dias_lab
+            st.caption(
+                f"Meta semanal por mampostero = {meta_dia:g} m²/día × {dias_lab} día(s) "
+                f"= **{meta_of:g} m²**."
+            )
 
-        # ── Cumplimiento de metas de la semana ───────────────
-        st.divider()
-        st.subheader("🎯 Cumplimiento de metas de la semana")
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            meta_piso = st.number_input(
-                "Meta por piso (m²/sem)", min_value=0.0, value=800.0, step=50.0,
-                key="cs_meta_piso", help="Meta semanal de m² por cada piso.",
-            )
-        with mc2:
-            meta_dia = st.number_input(
-                "Meta por mampostero (m²/día)", min_value=0.0, value=10.0, step=1.0,
-                key="cs_meta_dia",
-                help="Cada mampostero debe pegar este m² por día trabajado.",
-            )
-        with mc3:
-            dias_lab = st.number_input(
-                "Días laborables esta semana", min_value=1, max_value=7, value=5, step=1,
-                key="cs_dias_lab",
-                help="Lun–Vie = 5. Bájalo si hubo festivo y la meta semanal se ajusta.",
-            )
-        meta_of = meta_dia * dias_lab
-        st.caption(
-            f"Meta semanal por mampostero = {meta_dia:g} m²/día × {dias_lab} día(s) = "
-            f"**{meta_of:g} m²**. Si hubo festivo, baja los días laborables."
-        )
+        # ── Avance vs meta de la semana ──────────────────────
+        st.subheader("Avance vs meta de la semana")
 
-        # Avance por piso (barras horizontales: más fácil de leer)
-        st.markdown("#### 🏢 Por piso")
+        st.markdown("**Por piso**")
         piso = (del_sem.groupby("Piso", as_index=False)["M2_ejecutados"].sum()
                 .rename(columns={"M2_ejecutados": "M2"}))
         piso["Falta"] = (meta_piso - piso["M2"]).clip(lower=0)
@@ -1054,8 +1098,7 @@ def pagina_cierres(df: pd.DataFrame):
                             for r in pisos_no.itertuples())
             st.warning(f"⚠️ {len(pisos_no)} piso(s) NO llegaron a {meta_piso:g} m²: {det}.")
 
-        # Avance por mampostero (meta = m²/día × días laborables)
-        st.markdown("#### 👷 Por mampostero")
+        st.markdown("**Por mampostero**")
         ofi = cierre.rename(columns={"M2_total": "M2"})[["Oficial", "M2", "Dias"]].copy()
         ofi["m2_dia"] = ofi["M2"] / ofi["Dias"].where(ofi["Dias"] > 0)
         ofi["Meta"] = meta_of
@@ -1089,6 +1132,16 @@ def pagina_cierres(df: pd.DataFrame):
                 "ritmo es ≥ meta pero faltó m², fue por días no trabajados (p. ej. festivo "
                 "o ausencia), no por lentitud."
             )
+
+        # Detalle de consumo/sacos: disponible pero oculto para no saturar la vista.
+        with st.expander("📋 Ver detalle por mampostero (consumo y sacos)"):
+            styler = estilar_consumo(cierre.style, columna="Consumo_promedio").format(
+                {"M2_total": "{:.1f}", "Sacos_total": "{:.1f}",
+                 "Consumo_promedio": "{:.3f}", "Pct_cumple": "{:.0f}%"}
+            )
+            st.dataframe(styler, width="stretch")
+            st.caption("Los M² se atribuyen al **oficial**; el ayudante queda "
+                       "registrado pero no suma m² aparte.")
 
         st.download_button(
             "⬇️ Descargar cierre semanal (Excel)",
@@ -2121,7 +2174,7 @@ def main():
         st.markdown("---")
         pagina = st.radio(
             "Navegación",
-            ["📋 Ingreso de datos", "📈 Gráficas", "📅 Cierres",
+            ["📋 Ingreso de datos", "📈 Control", "📅 Cierres",
              "🧱 Materiales", "🎯 Last Planner", "📊 Registros"],
             label_visibility="collapsed",
         )
@@ -2154,7 +2207,7 @@ def main():
         pagina_ingreso(df)
     elif pagina == "📊 Registros":
         pagina_registros(df)
-    elif pagina == "📈 Gráficas":
+    elif pagina == "📈 Control":
         pagina_graficas(df)
     elif pagina == "📅 Cierres":
         pagina_cierres(df)
