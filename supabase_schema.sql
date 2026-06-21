@@ -55,6 +55,9 @@ create index if not exists idx_registros_grupo   on registros_mamposteria ("Grup
 --
 -- create policy "insercion_publica" on registros_mamposteria
 --     for insert with check (true);
+--
+-- create policy "borrado_publico" on registros_mamposteria
+--     for delete using (true);   -- habilita "🗑️ Eliminar registros (admin)"
 -- ─────────────────────────────────────────────────────────────
 
 
@@ -221,3 +224,30 @@ alter table almacen_salidas
 --
 -- create policy "salidas_insercion_publica" on almacen_salidas
 --     for insert with check (true);
+
+
+-- ─────────────────────────────────────────────────────────────
+-- ✅ RLS RECOMENDADO PARA PRODUCCIÓN (un solo bloque, copia y corre)
+--
+-- Postura más segura y simple para este MVP:
+--   1) En secrets:  SUPABASE_KEY      = service_role  (DATOS, solo servidor)
+--                   SUPABASE_ANON_KEY = anon          (solo el LOGIN)
+--   2) Corre ESTE bloque para ACTIVAR RLS en todas las tablas SIN crear
+--      políticas. Resultado: la clave `anon` (que es pública) queda SIN
+--      acceso a los datos; solo el servidor con `service_role` (que omite
+--      RLS) puede leer/escribir. Así, aunque se filtre la anon, no expone
+--      ni permite borrar nada.
+--
+-- ⚠️ NO corras esto si SUPABASE_KEY es la clave `anon`: dejarías la app sin
+--    acceso a los datos (RLS sin políticas = denegar todo a anon). En ese
+--    caso usa primero las políticas permisivas (Opción B) de arriba.
+-- ─────────────────────────────────────────────────────────────
+-- alter table registros_mamposteria enable row level security;
+-- alter table almacen_salidas       enable row level security;
+-- alter table almacen_entradas      enable row level security;
+-- alter table config_app            enable row level security;
+--
+-- Verifica que NO queden políticas permisivas que dejen entrar a la anon:
+-- select schemaname, tablename, policyname, cmd
+--   from pg_policies
+--  where schemaname = 'public';

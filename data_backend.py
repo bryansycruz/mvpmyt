@@ -43,6 +43,7 @@ import supabase_connector as sb
 
 __all__ = [
     "COLUMNAS", "leer_datos", "agregar_registros", "guardar_datos",
+    "eliminar_registros",
     "leer_salidas", "agregar_salidas",
     "leer_entradas", "agregar_entradas",
     "leer_catalogo", "guardar_catalogo",
@@ -151,6 +152,31 @@ def guardar_datos(df_completo: pd.DataFrame) -> None:
         sb.guardar_datos(df_completo)
         return
     sp.guardar_datos(df_completo)
+
+
+def eliminar_registros(grupo_ids: list) -> int:
+    """Elimina DEFINITIVAMENTE los registros de esos `Grupo_id`. Devuelve el
+    número de filas borradas.
+
+    - Supabase: DELETE dirigido por Grupo_id (no reinserta; si RLS lo deniega
+      devuelve 0 sin duplicar nada).
+    - SharePoint / local: lee el histórico, quita esas filas y reescribe.
+    """
+    ids = [str(g).strip() for g in (grupo_ids or []) if str(g).strip()]
+    if not ids:
+        return 0
+
+    if backend_actual() == "supabase":
+        return sb.eliminar_registros_por_grupo(ids)
+
+    actual = sp.leer_datos()
+    if actual is None or actual.empty or "Grupo_id" not in actual.columns:
+        return 0
+    mask = actual["Grupo_id"].astype(str).str.strip().isin(ids)
+    n = int(mask.sum())
+    if n:
+        sp.guardar_datos(actual[~mask])
+    return n
 
 
 # ─────────────────────────────────────────────────────────────

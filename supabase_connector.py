@@ -176,6 +176,22 @@ def guardar_datos(df_completo: pd.DataFrame) -> None:
         cliente.table(tabla).insert(_a_registros(df_completo)).execute()
 
 
+def eliminar_registros_por_grupo(grupo_ids: list) -> int:
+    """Borra DEFINITIVAMENTE las filas cuyo `Grupo_id` esté en la lista.
+
+    Hace SOLO un DELETE dirigido (no reinserta): si RLS lo deniega, no borra
+    nada y devuelve 0 — nunca duplica datos. Devuelve el nº de filas borradas
+    (PostgREST retorna las filas eliminadas en `resp.data`).
+    """
+    ids = [str(g).strip() for g in (grupo_ids or []) if str(g).strip()]
+    if not ids:
+        return 0
+    cliente = _cliente()
+    resp = (cliente.table(_nombre_tabla())
+            .delete().in_("Grupo_id", ids).execute())
+    return len(resp.data or [])
+
+
 # ─────────────────────────────────────────────────────────────
 # Salidas de almacén (vales de bloque, tabla `almacen_salidas`)
 # ─────────────────────────────────────────────────────────────

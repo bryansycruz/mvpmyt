@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from data_backend import (
-    leer_datos, agregar_registros, estado,
+    leer_datos, agregar_registros, eliminar_registros, estado,
     leer_config, guardar_config, config_persistente,
     leer_salidas, agregar_salidas,
     leer_entradas, agregar_entradas,
@@ -270,28 +270,47 @@ def excel_datos_y_resumen(df: pd.DataFrame) -> bytes:
 # Barra KPI global (visible en todas las pantallas)
 # ─────────────────────────────────────────────────────────────
 def barra_kpi_global(df: pd.DataFrame):
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Registros totales", len(df))
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Registros totales", len(df),
+                help="Número de muros/filas registrados en toda la obra.")
 
     total_m2 = df["M2_ejecutados"].sum() if not df.empty else 0.0
-    col2.metric("Total M²", f"{total_m2:,.1f} m²")
+    col2.metric("Total M² (obra)", f"{total_m2:,.1f} m²",
+                help="Suma de m² ejecutados en toda la obra.")
+
+    # El total de sacos se guarda solo en la 1.ª fila de cada grupo, así que
+    # sum() no duplica (= total de mortero gastado en toda la obra).
+    total_sacos = df["Num_sacos"].sum() if not df.empty else 0.0
+    col3.metric("Sacos gastados", f"{total_sacos:,.0f}",
+                help="Total de sacos de mortero consumidos en toda la obra.")
+    col3.caption(f"= {total_sacos * _kg():,.0f} kg")
 
     prom = consumo_ratio(df) if not df.empty else float("nan")
+    ayuda_consumo = (
+        f"Mortero de TODA la obra = total de sacos ÷ total de m² (sac/m²). "
+        f"Meta ≤ {_meta():g} sac/m²; menos es mejor."
+    )
     if pd.notna(prom):
-        col3.metric(
-            "Consumo promedio",
-            f"{prom:.3f}",
+        col4.metric(
+            "Consumo promedio mortero",
+            f"{prom:.3f} sac/m²",
             delta=f"{prom - _meta():+.3f} vs meta",
             delta_color="inverse",  # menor consumo es mejor
+            help=ayuda_consumo,
         )
-        col3.caption(f"= {prom * _kg():.1f} kg/m²")
+        col4.caption(f"= {prom * _kg():.1f} kg/m²")
     else:
-        col3.metric("Consumo promedio", "—")
+        col4.metric("Consumo promedio mortero", "—", help=ayuda_consumo)
 
     if not df.empty:
-        col4.metric("Cumple meta", f"{df['Cumple_meta'].mean() * 100:.0f}%")
+        col5.metric(
+            "Registros que cumplen meta",
+            f"{df['Cumple_meta'].mean() * 100:.0f}%",
+            help=(f"% de registros cuyo consumo de mortero quedó en o por debajo "
+                  f"de la meta (≤ {_meta():g} sac/m²)."),
+        )
     else:
-        col4.metric("Cumple meta", "—")
+        col5.metric("Registros que cumplen meta", "—")
 
     st.divider()
 
@@ -713,35 +732,59 @@ def pagina_graficas(df: pd.DataFrame):
     g1, g2 = st.columns(2)
 
     with g1:
+        oficiales_m2 = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
+        sel_m2 = st.multiselect(
+            "Mamposteros a mostrar", oficiales_m2, default=oficiales_m2,
+            key="graf_oficiales_m2",
+            help="Deja solo los mamposteros que quieras comparar (uno o varios).",
+        )
         por_oficial_m2 = (
-            df.groupby("Oficial", as_index=False)["M2_ejecutados"].sum()
+            df[df["Oficial"].isin(sel_m2)]
+            .groupby("Oficial", as_index=False)["M2_ejecutados"].sum()
             .sort_values("M2_ejecutados", ascending=False)
         )
-        fig1 = px.bar(
-            por_oficial_m2, x="Oficial", y="M2_ejecutados",
-            title="M² ejecutados por oficial", color_discrete_sequence=["#2980b9"],
-        )
-        fig1.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
-        st.plotly_chart(fig1, width="stretch")
+        if por_oficial_m2.empty:
+            st.info("Selecciona al menos un mampostero para ver la gráfica.")
+        else:
+            fig1 = px.bar(
+                por_oficial_m2, x="Oficial", y="M2_ejecutados",
+                title="M² ejecutados por oficial", color_discrete_sequence=["#2980b9"],
+            )
+            fig1.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
+            st.plotly_chart(fig1, width="stretch")
 
     with g2:
-        por_oficial_cons = consumo_por(df, "Oficial").sort_values("Consumo", ascending=False)
         meta = _meta()
-        por_oficial_cons["color"] = por_oficial_cons["Consumo"].apply(
-            lambda v: "Supera meta" if v > meta else "Cumple meta"
+        # Filtro directo por nombre: quitar a un mampostero de poco volumen (cuyo
+        # consumo sacos÷m² se dispara) reajusta la escala y deja ver a los demás.
+        oficiales_todos = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
+        oficiales_sel = st.multiselect(
+            "Mamposteros a mostrar", oficiales_todos, default=oficiales_todos,
+            key="graf_oficiales_consumo",
+            help="Quita de la lista a quien no quieras ver (p. ej. uno que hizo muy "
+                 "poco y no volvió: su consumo se dispara y achica a los demás). "
+                 "La tabla de abajo sigue mostrando a todos.",
         )
-        fig2 = px.bar(
-            por_oficial_cons, x="Oficial", y="Consumo",
-            color="color",
-            color_discrete_map={"Supera meta": "#c0392b", "Cumple meta": "#1e8449"},
-            title=f"Consumo por oficial (Σsacos÷Σm², meta = {meta:g})",
-        )
-        fig2.add_hline(
-            y=meta, line_dash="dash", line_color="red",
-            annotation_text=f"Meta {meta:g}", annotation_position="top left",
-        )
-        fig2.update_layout(xaxis_title="", yaxis_title="Consumo (sac/m²)", legend_title="")
-        st.plotly_chart(fig2, width="stretch")
+        por_oficial_cons = consumo_por(df[df["Oficial"].isin(oficiales_sel)], "Oficial")
+        por_oficial_cons = por_oficial_cons.sort_values("Consumo", ascending=False)
+        if por_oficial_cons.empty:
+            st.info("Selecciona al menos un mampostero para ver la gráfica.")
+        else:
+            por_oficial_cons["color"] = por_oficial_cons["Consumo"].apply(
+                lambda v: "Supera meta" if v > meta else "Cumple meta"
+            )
+            fig2 = px.bar(
+                por_oficial_cons, x="Oficial", y="Consumo",
+                color="color",
+                color_discrete_map={"Supera meta": "#c0392b", "Cumple meta": "#1e8449"},
+                title=f"Consumo por oficial (Σsacos÷Σm², meta = {meta:g})",
+            )
+            fig2.add_hline(
+                y=meta, line_dash="dash", line_color="red",
+                annotation_text=f"Meta {meta:g}", annotation_position="top left",
+            )
+            fig2.update_layout(xaxis_title="", yaxis_title="Consumo (sac/m²)", legend_title="")
+            st.plotly_chart(fig2, width="stretch")
 
     # Gráfica 3 — evolución diaria
     por_dia = (
@@ -758,6 +801,54 @@ def pagina_graficas(df: pd.DataFrame):
         fig3.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
         st.plotly_chart(fig3, width="stretch")
 
+    # Gráficas de sacos — el total va en la primera fila de cada grupo y cada
+    # grupo tiene un único Oficial/Piso/Zona, así que groupby().sum() no duplica.
+    st.subheader("Consumo de sacos")
+    gs1, gs2 = st.columns(2)
+
+    with gs1:
+        oficiales_sacos = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
+        sel_sacos = st.multiselect(
+            "Mamposteros a mostrar", oficiales_sacos, default=oficiales_sacos,
+            key="graf_oficiales_sacos",
+            help="Deja solo los mamposteros que quieras comparar (uno o varios).",
+        )
+        sacos_oficial = (
+            df[df["Oficial"].isin(sel_sacos)]
+            .groupby("Oficial", as_index=False)["Num_sacos"].sum()
+            .sort_values("Num_sacos", ascending=False)
+        )
+        if sacos_oficial.empty:
+            st.info("Selecciona al menos un mampostero para ver la gráfica.")
+        else:
+            figs1 = px.bar(
+                sacos_oficial, x="Oficial", y="Num_sacos",
+                title="Sacos consumidos por mampostero",
+                color_discrete_sequence=["#8e44ad"],
+            )
+            figs1.update_layout(xaxis_title="", yaxis_title="Sacos")
+            st.plotly_chart(figs1, width="stretch")
+
+    with gs2:
+        dim = st.selectbox(
+            "Agrupar sacos por", ["Piso", "Zona", "Sector"], key="graf_sacos_dim",
+            help="Elige la dimensión para ver dónde se gastaron los sacos.",
+        )
+        base_dim = df.copy()
+        base_dim[dim] = base_dim[dim].fillna("").astype(str).str.strip()
+        base_dim.loc[base_dim[dim] == "", dim] = "(sin dato)"
+        sacos_dim = (
+            base_dim.groupby(dim, as_index=False)["Num_sacos"].sum()
+            .sort_values("Num_sacos", ascending=False)
+        )
+        figs2 = px.bar(
+            sacos_dim, x=dim, y="Num_sacos",
+            title=f"Sacos consumidos por {dim.lower()}",
+            color_discrete_sequence=["#16a085"],
+        )
+        figs2.update_layout(xaxis_title="", yaxis_title="Sacos")
+        st.plotly_chart(figs2, width="stretch")
+
     # Gráfica 4 — Presencia de mamposteros (primer→último día + estado)
     st.subheader("Presencia de mamposteros")
     st.caption(
@@ -766,42 +857,46 @@ def pagina_graficas(df: pd.DataFrame):
     )
 
     df_f = df.dropna(subset=["Fecha"])
-    ref = df_f["Fecha"].max()
-    pres = (
-        df_f.groupby("Oficial")
-        .agg(
-            primer_dia=("Fecha", "min"),
-            ultimo_dia=("Fecha", "max"),
-            dias=("Fecha", lambda s: s.dt.date.nunique()),
-            m2_total=("M2_ejecutados", "sum"),
+    if df_f.empty:
+        # Sin fechas válidas no hay línea de tiempo (ref sería NaT y reventaría).
+        st.info("Aún no hay registros con fecha para la línea de presencia.")
+    else:
+        ref = df_f["Fecha"].max()
+        pres = (
+            df_f.groupby("Oficial")
+            .agg(
+                primer_dia=("Fecha", "min"),
+                ultimo_dia=("Fecha", "max"),
+                dias=("Fecha", lambda s: s.dt.date.nunique()),
+                m2_total=("M2_ejecutados", "sum"),
+            )
+            .reset_index()
         )
-        .reset_index()
-    )
-    pres["dias_sin_venir"] = (ref - pres["ultimo_dia"]).dt.days
-    pres["Estado"] = pres["dias_sin_venir"].apply(estado_presencia)
-    pres["fin"] = pres["ultimo_dia"] + pd.Timedelta(days=1)   # ancho visible si trabajó 1 día
+        pres["dias_sin_venir"] = (ref - pres["ultimo_dia"]).dt.days
+        pres["Estado"] = pres["dias_sin_venir"].apply(estado_presencia)
+        pres["fin"] = pres["ultimo_dia"] + pd.Timedelta(days=1)   # ancho visible si trabajó 1 día
 
-    orden = pres.sort_values("ultimo_dia")["Oficial"].tolist()
-    fig4 = px.timeline(
-        pres, x_start="primer_dia", x_end="fin", y="Oficial", color="Estado",
-        color_discrete_map={"Activo": "#1e8449", "En pausa": "#f39c12", "Inactivo": "#95a5a6"},
-        hover_data={"dias": True, "m2_total": ":.0f", "dias_sin_venir": True,
-                    "primer_dia": False, "fin": False},
-    )
-    # Marcas de los días con registro real dentro de cada barra.
-    dias_trab = df_f.drop_duplicates(["Oficial", "Fecha"])
-    fig4.add_trace(go.Scatter(
-        x=dias_trab["Fecha"], y=dias_trab["Oficial"], mode="markers",
-        marker=dict(color="rgba(44,62,80,0.45)", size=7, symbol="line-ns-open"),
-        name="día con registro", hoverinfo="skip",
-    ))
-    # x en ms epoch: en plotly 6 add_vline+annotation falla con un Timestamp directo.
-    fig4.add_vline(x=ref.timestamp() * 1000, line_dash="dash", line_color="#7f8c8d",
-                   annotation_text="último dato")
-    fig4.update_yaxes(categoryorder="array", categoryarray=orden, title="")
-    fig4.update_xaxes(title="")
-    fig4.update_layout(height=max(300, len(pres) * 38), legend_title="")
-    st.plotly_chart(fig4, width="stretch")
+        orden = pres.sort_values("ultimo_dia")["Oficial"].tolist()
+        fig4 = px.timeline(
+            pres, x_start="primer_dia", x_end="fin", y="Oficial", color="Estado",
+            color_discrete_map={"Activo": "#1e8449", "En pausa": "#f39c12", "Inactivo": "#95a5a6"},
+            hover_data={"dias": True, "m2_total": ":.0f", "dias_sin_venir": True,
+                        "primer_dia": False, "fin": False},
+        )
+        # Marcas de los días con registro real dentro de cada barra.
+        dias_trab = df_f.drop_duplicates(["Oficial", "Fecha"])
+        fig4.add_trace(go.Scatter(
+            x=dias_trab["Fecha"], y=dias_trab["Oficial"], mode="markers",
+            marker=dict(color="rgba(44,62,80,0.45)", size=7, symbol="line-ns-open"),
+            name="día con registro", hoverinfo="skip",
+        ))
+        # x en ms epoch: en plotly 6 add_vline+annotation falla con un Timestamp directo.
+        fig4.add_vline(x=ref.timestamp() * 1000, line_dash="dash", line_color="#7f8c8d",
+                       annotation_text="último dato")
+        fig4.update_yaxes(categoryorder="array", categoryarray=orden, title="")
+        fig4.update_xaxes(title="")
+        fig4.update_layout(height=max(300, len(pres) * 38), legend_title="")
+        st.plotly_chart(fig4, width="stretch")
 
     st.divider()
 
@@ -841,7 +936,12 @@ def pagina_cierres(df: pd.DataFrame):
         return
 
     df = df.dropna(subset=["Fecha"]).copy()
-    tab_dia, tab_semana = st.tabs(["📆 Cierre diario", "🗓️ Cierre semanal"])
+    if df.empty:
+        st.info("Los registros no tienen una fecha válida; no se puede hacer el cierre.")
+        return
+    tab_dia, tab_semana, tab_comparar = st.tabs(
+        ["📆 Cierre diario", "🗓️ Cierre semanal", "📊 Comparar periodos"]
+    )
 
     # ── Cierre diario ────────────────────────────────────────
     with tab_dia:
@@ -902,12 +1002,207 @@ def pagina_cierres(df: pd.DataFrame):
         st.dataframe(styler, width="stretch")
         st.caption("Los M² se atribuyen al **oficial**; el ayudante queda registrado pero no suma m² aparte.")
 
+        # ── Cumplimiento de metas de la semana ───────────────
+        st.divider()
+        st.subheader("🎯 Cumplimiento de metas de la semana")
+        mc1, mc2, mc3 = st.columns(3)
+        with mc1:
+            meta_piso = st.number_input(
+                "Meta por piso (m²/sem)", min_value=0.0, value=800.0, step=50.0,
+                key="cs_meta_piso", help="Meta semanal de m² por cada piso.",
+            )
+        with mc2:
+            meta_dia = st.number_input(
+                "Meta por mampostero (m²/día)", min_value=0.0, value=10.0, step=1.0,
+                key="cs_meta_dia",
+                help="Cada mampostero debe pegar este m² por día trabajado.",
+            )
+        with mc3:
+            dias_lab = st.number_input(
+                "Días laborables esta semana", min_value=1, max_value=7, value=5, step=1,
+                key="cs_dias_lab",
+                help="Lun–Vie = 5. Bájalo si hubo festivo y la meta semanal se ajusta.",
+            )
+        meta_of = meta_dia * dias_lab
+        st.caption(
+            f"Meta semanal por mampostero = {meta_dia:g} m²/día × {dias_lab} día(s) = "
+            f"**{meta_of:g} m²**. Si hubo festivo, baja los días laborables."
+        )
+
+        # Avance por piso (barras horizontales: más fácil de leer)
+        st.markdown("#### 🏢 Por piso")
+        piso = (del_sem.groupby("Piso", as_index=False)["M2_ejecutados"].sum()
+                .rename(columns={"M2_ejecutados": "M2"}))
+        piso["Falta"] = (meta_piso - piso["M2"]).clip(lower=0)
+        piso["Estado"] = (piso["M2"] >= meta_piso).map({True: "Cumple", False: "No cumple"})
+        figp = px.bar(
+            piso, x="M2", y="Piso", orientation="h", color="Estado", text_auto=".0f",
+            color_discrete_map={"Cumple": "#1e8449", "No cumple": "#c0392b"},
+            title=f"M² pegados por piso vs meta ({meta_piso:g} m²)",
+        )
+        figp.add_vline(x=meta_piso, line_dash="dash", line_color="red",
+                       annotation_text="meta", annotation_position="top")
+        figp.update_yaxes(categoryorder="total ascending", title="")
+        figp.update_layout(xaxis_title="M² pegados", legend_title="")
+        st.plotly_chart(figp, width="stretch")
+
+        pisos_no = piso[piso["Estado"] == "No cumple"].sort_values("Falta", ascending=False)
+        if pisos_no.empty:
+            st.success(f"✅ Todos los pisos cumplieron la meta de {meta_piso:g} m².")
+        else:
+            det = ", ".join(f"Piso {r.Piso} (faltó {r.Falta:.0f} m²)"
+                            for r in pisos_no.itertuples())
+            st.warning(f"⚠️ {len(pisos_no)} piso(s) NO llegaron a {meta_piso:g} m²: {det}.")
+
+        # Avance por mampostero (meta = m²/día × días laborables)
+        st.markdown("#### 👷 Por mampostero")
+        ofi = cierre.rename(columns={"M2_total": "M2"})[["Oficial", "M2", "Dias"]].copy()
+        ofi["m2_dia"] = ofi["M2"] / ofi["Dias"].where(ofi["Dias"] > 0)
+        ofi["Meta"] = meta_of
+        ofi["Falta"] = (meta_of - ofi["M2"]).clip(lower=0)
+        ofi["Estado"] = (ofi["M2"] >= meta_of).map({True: "Cumple", False: "No cumple"})
+        figo = px.bar(
+            ofi, x="M2", y="Oficial", orientation="h", color="Estado", text_auto=".0f",
+            color_discrete_map={"Cumple": "#1e8449", "No cumple": "#c0392b"},
+            title=f"M² pegados por mampostero vs meta ({meta_of:g} m²)",
+        )
+        figo.add_vline(x=meta_of, line_dash="dash", line_color="red",
+                       annotation_text="meta", annotation_position="top")
+        figo.update_yaxes(categoryorder="total ascending", title="")
+        figo.update_layout(xaxis_title="M² pegados", legend_title="")
+        st.plotly_chart(figo, width="stretch")
+
+        ofi_no = ofi[ofi["Estado"] == "No cumple"].sort_values("Falta", ascending=False)
+        if ofi_no.empty:
+            st.success(f"✅ Todos los mamposteros alcanzaron sus {meta_of:g} m².")
+        else:
+            st.warning(f"⚠️ {len(ofi_no)} mampostero(s) NO alcanzaron los {meta_of:g} m² "
+                       "de la semana. Por qué:")
+            for r in ofi_no.itertuples():
+                ritmo = "" if pd.isna(r.m2_dia) else f", ritmo {r.m2_dia:.1f} m²/día"
+                st.write(
+                    f"- **{r.Oficial}**: {r.M2:.1f} m² en {int(r.Dias)} día(s) "
+                    f"(faltó {r.Falta:.0f} m²{ritmo})."
+                )
+            st.caption(
+                f"**m²/día** = ritmo real por día trabajado (meta {meta_dia:g}). Si el "
+                "ritmo es ≥ meta pero faltó m², fue por días no trabajados (p. ej. festivo "
+                "o ausencia), no por lentitud."
+            )
+
         st.download_button(
             "⬇️ Descargar cierre semanal (Excel)",
-            data=excel_bytes(cierre),
+            data=excel_libro({
+                "Mamposteros": cierre,
+                "Metas_pisos": piso[["Piso", "M2", "Falta", "Estado"]],
+                "Metas_mamposteros": ofi[["Oficial", "Dias", "M2", "m2_dia",
+                                          "Meta", "Falta", "Estado"]],
+            }),
             file_name=f"cierre_semanal_{sel.start_time:%Y%m%d}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+    # ── Comparar periodos (semanas / meses) ──────────────────
+    with tab_comparar:
+        st.caption(
+            "Compara el avance entre **semanas** o **meses** de la obra: M², sacos "
+            "y consumo de mortero por periodo, con gráfica y descarga."
+        )
+        MESES_ES = ["ene", "feb", "mar", "abr", "may", "jun",
+                    "jul", "ago", "sep", "oct", "nov", "dic"]
+        c1, c2 = st.columns(2)
+        with c1:
+            gran = st.radio("Agrupar por", ["Semana", "Mes"], horizontal=True,
+                            key="cmp_gran")
+        with c2:
+            metrica = st.selectbox(
+                "Métrica a comparar",
+                ["M² ejecutados", "Sacos", "Consumo (sac/m²)"], key="cmp_metrica",
+            )
+
+        base = df.copy()
+        base["_per"] = base["Fecha"].dt.to_period("W" if gran == "Semana" else "M")
+
+        def _lbl(p):
+            if gran == "Semana":
+                return f"{p.start_time:%d/%m} – {p.end_time:%d/%m/%Y}"
+            return f"{MESES_ES[p.month - 1]} {p.year}"
+
+        # Una fila por periodo. El consumo es ratio de sumas (Σsacos÷Σm²), igual
+        # que en el resto de la app, no el promedio de los consumos por fila.
+        comp = (
+            base.groupby("_per", as_index=False)
+            .agg(M2=("M2_ejecutados", "sum"), Sacos=("Num_sacos", "sum"),
+                 Registros=("Oficial", "count"),
+                 Dias=("Fecha", lambda s: s.dt.date.nunique()))
+            .sort_values("_per")
+        )
+        comp["Consumo"] = comp["Sacos"] / comp["M2"].where(comp["M2"] > 0)
+        comp["Periodo"] = comp["_per"].apply(_lbl)
+
+        # En modo Semana, subfiltro por mes para no listar todas las semanas de la
+        # obra: cada semana se agrupa bajo el mes de su lunes (inicio). En modo Mes
+        # no se aplica (queda como estaba).
+        suf = "all"
+        if gran == "Semana":
+            comp["Mes"] = comp["_per"].apply(
+                lambda p: f"{MESES_ES[p.start_time.month - 1]} {p.start_time.year}"
+            )
+            meses_disp = list(dict.fromkeys(comp["Mes"]))  # ya viene cronológico
+            sel_meses = st.multiselect(
+                "Filtrar por mes", meses_disp, default=meses_disp,
+                key="cmp_meses_semana",
+                help="Acota las semanas a uno o varios meses; cada semana se "
+                     "cuenta en el mes de su lunes.",
+            )
+            comp = comp[comp["Mes"].isin(sel_meses)]
+            suf = "|".join(sel_meses) if sel_meses else "none"
+
+        # Selección libre de periodos: comparar semanas/meses salteados (p. ej.
+        # 1.ª semana de junio vs 3.ª de diciembre). La key incluye granularidad y
+        # meses elegidos para que al cambiarlos no queden semanas inválidas.
+        periodos_disp = comp["Periodo"].tolist()
+        sel_periodos = st.multiselect(
+            "Periodos a comparar", periodos_disp, default=periodos_disp,
+            key=f"cmp_periodos_{gran}_{suf}",
+            help="Elige las semanas/meses a comparar; pueden ir salteados "
+                 "(p. ej. 1.ª semana de junio y 3.ª de diciembre).",
+        )
+        comp = comp[comp["Periodo"].isin(sel_periodos)]
+        if comp.empty:
+            st.info("Selecciona al menos un periodo para comparar.")
+        else:
+            col_y = {"M² ejecutados": "M2", "Sacos": "Sacos",
+                     "Consumo (sac/m²)": "Consumo"}[metrica]
+            fig = px.bar(
+                comp, x="Periodo", y=col_y, title=f"{metrica} por {gran.lower()}",
+                category_orders={"Periodo": comp["Periodo"].tolist()},  # cronológico
+                color_discrete_sequence=["#2980b9"], text_auto=".1f",
+            )
+            if col_y == "Consumo":
+                fig.add_hline(y=_meta(), line_dash="dash", line_color="red",
+                              annotation_text=f"Meta {_meta():g}",
+                              annotation_position="top left")
+            fig.update_layout(xaxis_title="", yaxis_title=metrica, showlegend=False)
+            st.plotly_chart(fig, width="stretch")
+
+            tabla_cmp = comp[["Periodo", "Registros", "Dias", "M2", "Sacos", "Consumo"]].rename(
+                columns={"M2": "M2_total", "Sacos": "Sacos_total",
+                         "Consumo": "Consumo_sac_m2"}
+            )
+            st.dataframe(
+                tabla_cmp.style.format(
+                    {"M2_total": "{:.1f}", "Sacos_total": "{:.1f}",
+                     "Consumo_sac_m2": "{:.3f}"}, na_rep="—"
+                ),
+                width="stretch",
+            )
+            st.download_button(
+                "⬇️ Descargar comparación (Excel)",
+                data=excel_bytes(tabla_cmp),
+                file_name=f"comparacion_{gran.lower()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1711,6 +2006,103 @@ def _editor_config() -> None:
             st.rerun()
 
 
+def _eliminar_registros(df: pd.DataFrame) -> None:
+    """Panel (solo admin) para borrar DEFINITIVAMENTE registros mal digitados.
+
+    La unidad es el **ingreso** (un `Grupo_id` = un envío del formulario, con
+    todos sus muros). Usa un DELETE dirigido por Grupo_id (ver
+    `eliminar_registros`): si los permisos lo impiden devuelve 0 y se avisa, sin
+    duplicar ni corromper datos. Acción irreversible."""
+    with st.expander("🗑️ Eliminar registros (admin)"):
+        st.caption(
+            "Borra **definitivamente** un ingreso mal digitado (con todos sus "
+            "muros), también de la base de datos. **No se puede deshacer.**"
+        )
+        if df is None or df.empty:
+            st.info("No hay registros para eliminar.")
+            return
+
+        d = df.copy()
+        d["Grupo_id"] = d["Grupo_id"].fillna("").astype(str).str.strip()
+        con_grupo = d[d["Grupo_id"] != ""]
+        if con_grupo.empty:
+            st.info("Los registros actuales no tienen identificador de grupo; "
+                    "no se pueden eliminar desde aquí.")
+            return
+
+        resumen = (
+            con_grupo.groupby("Grupo_id")
+            .agg(Fecha=("Fecha", "first"), Oficial=("Oficial", "first"),
+                 Sector=("Sector", "first"), Piso=("Piso", "first"),
+                 Muros=("Largo_m", "count"), M2=("M2_ejecutados", "sum"),
+                 Sacos=("Num_sacos", "sum"))
+            .reset_index()
+            .sort_values("Fecha", ascending=False)
+        )
+
+        def _txt(v):
+            return str(v) if pd.notna(v) else "—"
+
+        def _lbl(r):
+            f = (pd.to_datetime(r["Fecha"]).strftime("%d/%m/%Y")
+                 if pd.notna(r["Fecha"]) else "sin fecha")
+            return (f"{f} · {_txt(r['Oficial'])} · {_txt(r['Sector'])}/"
+                    f"{_txt(r['Piso'])} · {int(r['Muros'])} muro(s) · "
+                    f"{r['M2']:.1f} m² · {r['Sacos']:.0f} sacos")
+
+        resumen["_lbl"] = resumen.apply(_lbl, axis=1)
+
+        # Nonce: tras borrar, sube y los widgets renacen vacíos (sin selección
+        # ni checkbox marcado) y sin arrastrar opciones que ya no existen.
+        nd = st.session_state.setdefault("del_nonce", 0)
+        # Las opciones son índices únicos; el texto se muestra con format_func.
+        # Así dos ingresos con la MISMA etiqueta no colisionan: cada uno es una
+        # opción distinta y se borra el Grupo_id correcto.
+        elegidos = st.multiselect(
+            "Registros a eliminar", resumen.index.tolist(),
+            format_func=lambda i: resumen.loc[i, "_lbl"], key=f"del_sel_{nd}",
+            help="Cada opción es un ingreso completo (todos sus muros).",
+        )
+        if not elegidos:
+            return
+
+        ids = resumen.loc[elegidos, "Grupo_id"].tolist()
+        n_filas = int(d["Grupo_id"].isin(ids).sum())
+        st.warning(
+            f"Se eliminarán **{len(ids)} ingreso(s)** = **{n_filas} fila(s)** de la "
+            "base de datos. **No se puede deshacer.**"
+        )
+        ok = st.checkbox("Sí, eliminar definitivamente", key=f"del_ok_{nd}")
+        if st.button("🗑️ Eliminar definitivamente", type="primary",
+                     disabled=not ok, use_container_width=True):
+            try:
+                borradas = eliminar_registros(ids)
+            except Exception as e:
+                st.error(f"No se pudo eliminar: {e}")
+                return
+            if borradas == 0:
+                st.error(
+                    "No se borró nada. Si usas la clave **anon** en Supabase, falta "
+                    "la política de borrado (DELETE) en la tabla: usa la clave "
+                    "service_role o agrégala (ver supabase_schema.sql)."
+                )
+                return
+            st.cache_data.clear()
+            st.session_state["del_nonce"] = nd + 1
+            st.toast(f"Eliminadas {borradas} fila(s) ✅")
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────
+# Pantalla 6 — Last Planner (avance semanal vs meta por piso)
+# ─────────────────────────────────────────────────────────────
+def pagina_last_planner(df: pd.DataFrame):
+    """Last Planner — por ahora vacío (placeholder). Se irá construyendo después
+    (compromisos semanales, PPC, restricciones, etc.)."""
+    st.header("🎯 Last Planner")
+    st.info("🚧 En construcción. Pronto encontrarás aquí el plan semanal.")
+
+
 def main():
     requerir_login()
 
@@ -1729,8 +2121,8 @@ def main():
         st.markdown("---")
         pagina = st.radio(
             "Navegación",
-            ["📋 Ingreso de datos", "📊 Registros", "📈 Gráficas", "📅 Cierres",
-             "🧱 Materiales"],
+            ["📋 Ingreso de datos", "📈 Gráficas", "📅 Cierres",
+             "🧱 Materiales", "🎯 Last Planner", "📊 Registros"],
             label_visibility="collapsed",
         )
         st.markdown("---")
@@ -1739,6 +2131,7 @@ def main():
         st.caption(f"⚖️ KG por saco: {_kg():g} kg")
         if _es_admin():
             _editor_config()
+            _eliminar_registros(df)
         st.markdown("---")
         _render_estado_conexion(conectado)
         st.markdown("---")
@@ -1765,8 +2158,10 @@ def main():
         pagina_graficas(df)
     elif pagina == "📅 Cierres":
         pagina_cierres(df)
-    else:
+    elif pagina == "🧱 Materiales":
         pagina_materiales(df)
+    else:
+        pagina_last_planner(df)
 
 
 if __name__ == "__main__":
