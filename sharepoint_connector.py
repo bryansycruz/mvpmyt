@@ -23,10 +23,15 @@ Las credenciales se leen de st.secrets (.streamlit/secrets.toml).
 import io
 import os
 
-import msal
 import requests
 import pandas as pd
 import streamlit as st
+
+# `msal` se importa de forma PEREZOSA dentro de get_access_token() (no aquí):
+# data_backend importa este conector SIEMPRE (aunque el backend activo sea
+# Supabase). Si `msal` falla o no está instalado en el entorno de despliegue,
+# un import de nivel superior tumbaría toda la app; perezoso solo afecta a quien
+# realmente use SharePoint. Mismo patrón que `from supabase import ...`.
 
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 
@@ -58,6 +63,8 @@ HOJA_ENTRADAS = "Entradas_almacen"
 # ─────────────────────────────────────────────────────────────
 def get_access_token() -> str:
     """Obtiene un token OAuth2 vía client credentials (sin login de usuario)."""
+    import msal  # perezoso: solo se necesita si se usa SharePoint (ver cabecera)
+
     app = msal.ConfidentialClientApplication(
         client_id=st.secrets["CLIENT_ID"],
         client_credential=st.secrets["CLIENT_SECRET"],
