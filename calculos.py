@@ -37,10 +37,11 @@ FACTOR_AJUSTE_BLOQUES = 1.0
 # `meta_pedido` es el total pedido del proyecto/torre para ese tipo de bloque
 # (0 = sin meta); sirve para ver el % del pedido recibido en 📦 Movimientos de almacén.
 #
-# Los 8 tipos y sus números (unds_por_estiba, meta_pedido) salen del control real
+# Los tipos y sus números (unds_por_estiba, meta_pedido) salen del control real
 # de entrada (Excel "Control ladrillo", una hoja por tipo). El admin los edita en
-# el catálogo. Medidas de Catalán moreno y Bloque 20: POR CONFIRMAR (solo afectan
-# el teórico de la conciliación si se usan en muros).
+# el catálogo. Catalán moreno mide 0.30 × 0.15 × 0.10 (confirmado) y viene en P.V.
+# y P.H.; medidas de Bloque 20: POR CONFIRMAR (solo afectan el teórico de la
+# conciliación si se usan en muros).
 CATALOGO_BLOQUES_DEFECTO = [
     # P.V. = perforación vertical (estructural, donde van las dovelas).
     {"nombre": "P.V. rayado 12", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
@@ -51,8 +52,8 @@ CATALOGO_BLOQUES_DEFECTO = [
      "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 108, "meta_pedido": 13814},
     {"nombre": "P.V. liso 15", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
      "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 96, "meta_pedido": 30784},
-    {"nombre": "Catalán moreno", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
-     "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 280, "meta_pedido": 63045},
+    {"nombre": "Catalán moreno", "clase": "PV", "largo_m": 0.30, "alto_m": 0.15,
+     "espesor_m": 0.10, "junta_m": 0.015, "unds_por_estiba": 280, "meta_pedido": 63045},
     {"nombre": "Bloque 20", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
      "espesor_m": 0.20, "junta_m": 0.015, "unds_por_estiba": 1, "meta_pedido": 6833},
     # P.H. = perforación horizontal (divisorio).
@@ -60,6 +61,10 @@ CATALOGO_BLOQUES_DEFECTO = [
      "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 135, "meta_pedido": 0},
     {"nombre": "P.H. rayado 15", "clase": "PH", "largo_m": 0.40, "alto_m": 0.20,
      "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 125, "meta_pedido": 0},
+    # Mismo bloque Catalán que el P.V. de arriba, pero con perforación horizontal
+    # (uso divisorio). Mismas medidas; meta_pedido va en la variante P.V.
+    {"nombre": "Catalán moreno P.H.", "clase": "PH", "largo_m": 0.30, "alto_m": 0.15,
+     "espesor_m": 0.10, "junta_m": 0.015, "unds_por_estiba": 280, "meta_pedido": 0},
 ]
 
 

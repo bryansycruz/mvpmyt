@@ -150,6 +150,24 @@ create table if not exists almacen_entradas (
 create index if not exists idx_entradas_fecha on almacen_entradas ("Fecha");
 create index if not exists idx_entradas_tipo  on almacen_entradas ("Tipo_bloque");
 
+-- Estibas devueltas (pallets de madera VACÍOS regresados al proveedor). Ledger
+-- APARTE del material: NO está unido al pedido ni a los ladrillos y NO afecta el
+-- stock de bloque. `Cantidad` = nº de pallets devueltos. El borrado de un
+-- movimiento mal digitado se hace por `id` y funciona con la clave service_role
+-- (omite RLS); con la clave anon haría falta una policy DELETE.
+create table if not exists almacen_estibas_dev (
+    id                      bigint generated always as identity primary key,
+    "Fecha"                 date not null,
+    "Cantidad"              double precision not null check ("Cantidad" > 0),
+    "Proveedor"             text,
+    "No_remision"           text,
+    "Observaciones"         text,
+    "Timestamp_registro"    timestamptz,
+    created_at              timestamptz default now()
+);
+
+create index if not exists idx_estibas_fecha on almacen_estibas_dev ("Fecha");
+
 -- Config nueva del módulo de desperdicio (si faltan, la app usa sus defectos):
 --   umbral_desperdicio_pct → semáforo de la conciliación (verde ≤ umbral)
 --   factor_ajuste_bloques  → multiplica el teórico en la conciliación para
@@ -189,6 +207,33 @@ alter table almacen_salidas
 
 
 -- ─────────────────────────────────────────────────────────────
+-- POLÍTICAS MVP APLICADAS EN PRODUCCIÓN (Opción B: clave anon) — 2026-06-22
+-- Estado real del proyecto: la app usa la clave `anon`, así que RLS está
+-- activado en todas las tablas CON políticas permisivas. Lo de abajo ya está
+-- aplicado en prod (vía migraciones `almacen_estibas_dev` y `politicas_delete_mvp`);
+-- se deja aquí para reproducirlo. Idempotente. Si algún día se pasa a
+-- `service_role` (Opción A, más abajo), estas políticas se eliminan.
+--
+-- RLS + lectura/inserción de la tabla nueva de estibas devueltas:
+-- alter table almacen_estibas_dev enable row level security;
+-- create policy "estibas_lectura_mvp"   on almacen_estibas_dev
+--     for select to anon, authenticated using (true);
+-- create policy "estibas_insercion_mvp" on almacen_estibas_dev
+--     for insert to anon, authenticated with check (true);
+--
+-- DELETE (corregir movimientos/registros mal digitados desde la app). Las de
+-- SELECT/INSERT de las otras tablas ya existían; faltaban las de borrado:
+-- create policy "entradas_borrado_mvp" on almacen_entradas
+--     for delete to anon, authenticated using (true);
+-- create policy "salidas_borrado_mvp" on almacen_salidas
+--     for delete to anon, authenticated using (true);
+-- create policy "estibas_borrado_mvp" on almacen_estibas_dev
+--     for delete to anon, authenticated using (true);
+-- create policy "borrado_mvp" on registros_mamposteria
+--     for delete to anon, authenticated using (true);
+
+
+-- ─────────────────────────────────────────────────────────────
 -- ENDURECIMIENTO PARA PRODUCCIÓN (datos sensibles) — correr DESPUÉS
 -- de cambiar las claves en secrets, en este orden:
 --
@@ -202,10 +247,16 @@ alter table almacen_salidas
 --
 -- drop policy if exists "lectura_mvp"               on registros_mamposteria;
 -- drop policy if exists "insercion_mvp"             on registros_mamposteria;
+-- drop policy if exists "borrado_mvp"               on registros_mamposteria;
 -- drop policy if exists "salidas_lectura_mvp"       on almacen_salidas;
 -- drop policy if exists "salidas_insercion_mvp"     on almacen_salidas;
+-- drop policy if exists "salidas_borrado_mvp"       on almacen_salidas;
 -- drop policy if exists "entradas_lectura_mvp"      on almacen_entradas;
 -- drop policy if exists "entradas_insercion_mvp"    on almacen_entradas;
+-- drop policy if exists "entradas_borrado_mvp"      on almacen_entradas;
+-- drop policy if exists "estibas_lectura_mvp"       on almacen_estibas_dev;
+-- drop policy if exists "estibas_insercion_mvp"     on almacen_estibas_dev;
+-- drop policy if exists "estibas_borrado_mvp"       on almacen_estibas_dev;
 -- drop policy if exists "config_lectura_mvp"        on config_app;
 -- drop policy if exists "config_insercion_mvp"      on config_app;
 -- drop policy if exists "config_actualizacion_mvp"  on config_app;
@@ -245,6 +296,7 @@ alter table almacen_salidas
 -- alter table registros_mamposteria enable row level security;
 -- alter table almacen_salidas       enable row level security;
 -- alter table almacen_entradas      enable row level security;
+-- alter table almacen_estibas_dev   enable row level security;
 -- alter table config_app            enable row level security;
 --
 -- Verifica que NO queden políticas permisivas que dejen entrar a la anon:

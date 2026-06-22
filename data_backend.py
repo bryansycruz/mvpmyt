@@ -46,6 +46,8 @@ __all__ = [
     "eliminar_registros",
     "leer_salidas", "agregar_salidas",
     "leer_entradas", "agregar_entradas",
+    "leer_estibas", "agregar_estibas",
+    "eliminar_entradas", "eliminar_salidas", "eliminar_estibas",
     "leer_catalogo", "guardar_catalogo",
     "leer_valores_ocultos", "guardar_valores_ocultos",
     "backend_actual", "estado", "modo_local",
@@ -223,6 +225,80 @@ def agregar_entradas(df_nuevas: pd.DataFrame) -> None:
     actual = sp.leer_entradas()
     nuevo = pd.concat([actual, df_nuevas], ignore_index=True)
     sp.guardar_entradas(nuevo)
+
+
+# ─────────────────────────────────────────────────────────────
+# Estibas devueltas (pallets regresados al proveedor, ledger aparte)
+# ─────────────────────────────────────────────────────────────
+def leer_estibas() -> pd.DataFrame:
+    if backend_actual() == "supabase":
+        return sb.leer_estibas()
+    return sp.leer_estibas()   # cubre SharePoint y Excel local
+
+
+def agregar_estibas(df_nuevas: pd.DataFrame) -> None:
+    """Añade devoluciones nuevas de estibas (mismo patrón que entradas)."""
+    if df_nuevas is None or df_nuevas.empty:
+        return
+
+    if backend_actual() == "supabase":
+        sb.insertar_estibas(df_nuevas)
+        return
+
+    actual = sp.leer_estibas()
+    nuevo = pd.concat([actual, df_nuevas], ignore_index=True)
+    sp.guardar_estibas(nuevo)
+
+
+# ─────────────────────────────────────────────────────────────
+# Borrado de movimientos de almacén (corregir errores; el stock se recalcula)
+# ─────────────────────────────────────────────────────────────
+def _eliminar_movimientos(filas_df: pd.DataFrame, sb_por_id, sp_leer, sp_guardar) -> int:
+    """Borra DEFINITIVAMENTE las filas indicadas de un ledger de almacén.
+
+    `filas_df` son las filas seleccionadas en la UI (vienen de la lectura, así
+    que en Supabase traen la columna `id`). Devuelve el nº de filas borradas.
+
+    - Supabase: DELETE dirigido por `id` (no reinserta; si RLS lo deniega
+      devuelve 0 sin duplicar nada).
+    - SharePoint / local: anti-join por `Timestamp_registro` (comparación en
+      memoria, no string-match de timestamptz) y reescribe el ledger completo.
+    """
+    if filas_df is None or filas_df.empty:
+        return 0
+
+    if backend_actual() == "supabase":
+        ids = [i for i in filas_df.get("id", pd.Series(dtype=float)).tolist()
+               if pd.notna(i)]
+        return sb_por_id(ids)
+
+    actual = sp_leer()
+    if actual is None or actual.empty or "Timestamp_registro" not in actual.columns:
+        return 0
+    objetivo = pd.to_datetime(filas_df.get("Timestamp_registro"), errors="coerce").dropna()
+    mask = pd.to_datetime(actual["Timestamp_registro"], errors="coerce").isin(set(objetivo))
+    n = int(mask.sum())
+    if n:
+        sp_guardar(actual[~mask])
+    return n
+
+
+def eliminar_entradas(filas_df: pd.DataFrame) -> int:
+    """Borra las entradas de almacén seleccionadas. Devuelve nº borradas."""
+    return _eliminar_movimientos(filas_df, sb.eliminar_entradas_por_id,
+                                 sp.leer_entradas, sp.guardar_entradas)
+
+
+def eliminar_salidas(filas_df: pd.DataFrame) -> int:
+    """Borra las salidas de almacén seleccionadas. Devuelve nº borradas."""
+    return _eliminar_movimientos(filas_df, sb.eliminar_salidas_por_id,
+                                 sp.leer_salidas, sp.guardar_salidas)
+
+
+def eliminar_estibas(filas_df: pd.DataFrame) -> int:
+    """Borra las devoluciones de estibas seleccionadas. Devuelve nº borradas."""
+    return _eliminar_movimientos(filas_df, sb.eliminar_estibas_por_id,
+                                 sp.leer_estibas, sp.guardar_estibas)
 
 
 # ─────────────────────────────────────────────────────────────

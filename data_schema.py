@@ -132,3 +132,34 @@ def normalizar_entradas(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("Cantidad", "Estibas_ing", "Estibas_dev"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+# ─────────────────────────────────────────────────────────────
+# Estibas devueltas (pallets de madera vacíos regresados al proveedor)
+# ─────────────────────────────────────────────────────────────
+# Ledger APARTE del material: las estibas devueltas NO están ligadas al pedido
+# ni a los ladrillos, no afectan el stock de bloque. Una fila por devolución;
+# `Cantidad` es el número de pallets que se regresan. Se guarda en su propia
+# tabla `almacen_estibas_dev` (Supabase) / hoja `Estibas_dev` (Excel/SharePoint).
+COLUMNAS_ESTIBAS = [
+    "Fecha", "Cantidad", "Proveedor", "No_remision",
+    "Observaciones", "Timestamp_registro",
+]
+
+
+def df_vacio_estibas() -> pd.DataFrame:
+    """DataFrame vacío con todas las columnas del esquema de estibas devueltas."""
+    return pd.DataFrame(columns=COLUMNAS_ESTIBAS)
+
+
+def normalizar_estibas(df: pd.DataFrame) -> pd.DataFrame:
+    """Garantiza columnas y tipos del esquema de estibas devueltas."""
+    for col in COLUMNAS_ESTIBAS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    df = df[COLUMNAS_ESTIBAS].copy()
+
+    df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
+    df["Timestamp_registro"] = pd.to_datetime(df["Timestamp_registro"], errors="coerce")
+    df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce")
+    return df

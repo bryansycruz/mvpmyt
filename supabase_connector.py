@@ -30,12 +30,14 @@ from data_schema import (
     COLUMNAS, COLUMNAS_FECHA, df_vacio, normalizar,
     COLUMNAS_SALIDAS, df_vacio_salidas, normalizar_salidas,
     COLUMNAS_ENTRADAS, df_vacio_entradas, normalizar_entradas,
+    COLUMNAS_ESTIBAS, df_vacio_estibas, normalizar_estibas,
 )
 
 TABLA_POR_DEFECTO = "registros_mamposteria"
 TABLA_CONFIG_POR_DEFECTO = "config_app"     # tabla clave-valor de configuración
 TABLA_SALIDAS_POR_DEFECTO = "almacen_salidas"   # vales de salida de bloque
 TABLA_ENTRADAS_POR_DEFECTO = "almacen_entradas"  # remisiones de entrada de bloque
+TABLA_ESTIBAS_POR_DEFECTO = "almacen_estibas_dev"  # pallets devueltos al proveedor
 
 
 # ─────────────────────────────────────────────────────────────
@@ -88,6 +90,14 @@ def _nombre_tabla_entradas() -> str:
         return valor or TABLA_ENTRADAS_POR_DEFECTO
     except Exception:
         return TABLA_ENTRADAS_POR_DEFECTO
+
+
+def _nombre_tabla_estibas() -> str:
+    try:
+        valor = str(st.secrets["SUPABASE_TABLE_ESTIBAS"]).strip()
+        return valor or TABLA_ESTIBAS_POR_DEFECTO
+    except Exception:
+        return TABLA_ESTIBAS_POR_DEFECTO
 
 
 @st.cache_resource(show_spinner=False)
@@ -195,15 +205,43 @@ def eliminar_registros_por_grupo(grupo_ids: list) -> int:
 # ─────────────────────────────────────────────────────────────
 # Salidas de almacén (vales de bloque, tabla `almacen_salidas`)
 # ─────────────────────────────────────────────────────────────
-def leer_salidas() -> pd.DataFrame:
-    """Descarga todas las salidas de almacén como DataFrame normalizado."""
+def _con_id(crudo: list[dict], normalizador) -> pd.DataFrame:
+    """Normaliza una respuesta de Supabase pero CONSERVA la columna `id`.
+
+    El normalizador reindexa a las columnas del esquema (que no incluyen `id`),
+    así que el `id` se re-pega al final. Sirve para poder borrar una fila puntual
+    de almacén por su id. El `id` extra no molesta a los demás consumidores.
+    """
+    bruto = pd.DataFrame(crudo)
+    df = normalizador(bruto)
+    if "id" in bruto.columns:
+        df["id"] = pd.to_numeric(bruto["id"], errors="coerce").values
+    return df
+
+
+def _eliminar_por_id(tabla: str, ids: list) -> int:
+    """DELETE dirigido por `id` en una tabla de almacén. Devuelve nº borradas.
+
+    No reinserta: si RLS lo deniega, no borra nada y devuelve 0 (nunca duplica).
+    PostgREST retorna las filas eliminadas en `resp.data`.
+    """
+    limpio = [int(i) for i in (ids or []) if pd.notna(i)]
+    if not limpio:
+        return 0
     cliente = _cliente()
-    resp = (cliente.table(_nombre_tabla_salidas())
-            .select(",".join(f'"{c}"' for c in COLUMNAS_SALIDAS)).execute())
+    resp = cliente.table(tabla).delete().in_("id", limpio).execute()
+    return len(resp.data or [])
+
+
+def leer_salidas() -> pd.DataFrame:
+    """Descarga todas las salidas de almacén como DataFrame normalizado (con `id`)."""
+    cliente = _cliente()
+    cols = ",".join(['"id"'] + [f'"{c}"' for c in COLUMNAS_SALIDAS])
+    resp = cliente.table(_nombre_tabla_salidas()).select(cols).execute()
     datos = resp.data or []
     if not datos:
         return df_vacio_salidas()
-    return normalizar_salidas(pd.DataFrame(datos))
+    return _con_id(datos, normalizar_salidas)
 
 
 def insertar_salidas(df_nuevas: pd.DataFrame) -> None:
@@ -216,18 +254,23 @@ def insertar_salidas(df_nuevas: pd.DataFrame) -> None:
     cliente.table(_nombre_tabla_salidas()).insert(registros).execute()
 
 
+def eliminar_salidas_por_id(ids: list) -> int:
+    """Borra DEFINITIVAMENTE las salidas con esos `id`. Devuelve nº borradas."""
+    return _eliminar_por_id(_nombre_tabla_salidas(), ids)
+
+
 # ─────────────────────────────────────────────────────────────
 # Entradas de almacén (remisiones de compra, tabla `almacen_entradas`)
 # ─────────────────────────────────────────────────────────────
 def leer_entradas() -> pd.DataFrame:
-    """Descarga todas las entradas de almacén como DataFrame normalizado."""
+    """Descarga todas las entradas de almacén como DataFrame normalizado (con `id`)."""
     cliente = _cliente()
-    resp = (cliente.table(_nombre_tabla_entradas())
-            .select(",".join(f'"{c}"' for c in COLUMNAS_ENTRADAS)).execute())
+    cols = ",".join(['"id"'] + [f'"{c}"' for c in COLUMNAS_ENTRADAS])
+    resp = cliente.table(_nombre_tabla_entradas()).select(cols).execute()
     datos = resp.data or []
     if not datos:
         return df_vacio_entradas()
-    return normalizar_entradas(pd.DataFrame(datos))
+    return _con_id(datos, normalizar_entradas)
 
 
 def insertar_entradas(df_nuevas: pd.DataFrame) -> None:
@@ -238,6 +281,40 @@ def insertar_entradas(df_nuevas: pd.DataFrame) -> None:
                              normalizador=normalizar_entradas)
     cliente = _cliente()
     cliente.table(_nombre_tabla_entradas()).insert(registros).execute()
+
+
+def eliminar_entradas_por_id(ids: list) -> int:
+    """Borra DEFINITIVAMENTE las entradas con esos `id`. Devuelve nº borradas."""
+    return _eliminar_por_id(_nombre_tabla_entradas(), ids)
+
+
+# ─────────────────────────────────────────────────────────────
+# Estibas devueltas (pallets, tabla `almacen_estibas_dev`)
+# ─────────────────────────────────────────────────────────────
+def leer_estibas() -> pd.DataFrame:
+    """Descarga todas las estibas devueltas como DataFrame normalizado (con `id`)."""
+    cliente = _cliente()
+    cols = ",".join(['"id"'] + [f'"{c}"' for c in COLUMNAS_ESTIBAS])
+    resp = cliente.table(_nombre_tabla_estibas()).select(cols).execute()
+    datos = resp.data or []
+    if not datos:
+        return df_vacio_estibas()
+    return _con_id(datos, normalizar_estibas)
+
+
+def insertar_estibas(df_nuevas: pd.DataFrame) -> None:
+    """Inserta SOLO las devoluciones de estibas nuevas (append)."""
+    if df_nuevas is None or df_nuevas.empty:
+        return
+    registros = _a_registros(df_nuevas, columnas=COLUMNAS_ESTIBAS,
+                             normalizador=normalizar_estibas)
+    cliente = _cliente()
+    cliente.table(_nombre_tabla_estibas()).insert(registros).execute()
+
+
+def eliminar_estibas_por_id(ids: list) -> int:
+    """Borra DEFINITIVAMENTE las estibas devueltas con esos `id`. Devuelve nº borradas."""
+    return _eliminar_por_id(_nombre_tabla_estibas(), ids)
 
 
 # ─────────────────────────────────────────────────────────────
