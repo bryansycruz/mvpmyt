@@ -27,6 +27,10 @@ KG_POR_SACO = 42.5       # Kilogramos por saco de mortero
 UMBRAL_DESPERDICIO_PCT = 7.0
 FACTOR_AJUSTE_BLOQUES = 1.0
 
+# Espesores de junta de pega (cm) que ofrece la calculadora, igual que la hoja
+# "Referencia" del Excel. La pega real de Serrania es 1.5 cm.
+JUNTAS_CM = [1.0, 1.5, 1.8, 2.0, 2.4]
+
 # Catálogo por defecto de bloques de Serrania (editable por admin en Supabase).
 # clase: "PV" = perforación vertical (estructural, donde van las dovelas)
 #        "PH" = perforación horizontal (divisorio).
@@ -39,8 +43,9 @@ FACTOR_AJUSTE_BLOQUES = 1.0
 #
 # Los tipos y sus números (unds_por_estiba, meta_pedido) salen del control real
 # de entrada (Excel "Control ladrillo", una hoja por tipo). El admin los edita en
-# el catálogo. Catalán moreno mide 0.30 × 0.15 × 0.10 (confirmado) y viene en P.V.
-# y P.H.; medidas de Bloque 20: POR CONFIRMAR (solo afectan el teórico de la
+# el catálogo. Catalán moreno: cara de pega 0.30 (largo) × 0.10 (alto), espesor 0.15;
+# así rinde 27.6 und/m² con junta 1.5 cm (confirmado). Viene en P.V. y P.H.; medidas
+# de Bloque 20: POR CONFIRMAR (solo afectan el teórico de la
 # conciliación si se usan en muros).
 CATALOGO_BLOQUES_DEFECTO = [
     # P.V. = perforación vertical (estructural, donde van las dovelas).
@@ -52,8 +57,8 @@ CATALOGO_BLOQUES_DEFECTO = [
      "espesor_m": 0.12, "junta_m": 0.015, "unds_por_estiba": 108, "meta_pedido": 13814},
     {"nombre": "P.V. liso 15", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
      "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 96, "meta_pedido": 30784},
-    {"nombre": "Catalán moreno", "clase": "PV", "largo_m": 0.30, "alto_m": 0.15,
-     "espesor_m": 0.10, "junta_m": 0.015, "unds_por_estiba": 280, "meta_pedido": 63045},
+    {"nombre": "Catalán moreno", "clase": "PV", "largo_m": 0.30, "alto_m": 0.10,
+     "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 280, "meta_pedido": 63045},
     {"nombre": "Bloque 20", "clase": "PV", "largo_m": 0.40, "alto_m": 0.20,
      "espesor_m": 0.20, "junta_m": 0.015, "unds_por_estiba": 1, "meta_pedido": 6833},
     # P.H. = perforación horizontal (divisorio).
@@ -63,8 +68,8 @@ CATALOGO_BLOQUES_DEFECTO = [
      "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 125, "meta_pedido": 0},
     # Mismo bloque Catalán que el P.V. de arriba, pero con perforación horizontal
     # (uso divisorio). Mismas medidas; meta_pedido va en la variante P.V.
-    {"nombre": "Catalán moreno P.H.", "clase": "PH", "largo_m": 0.30, "alto_m": 0.15,
-     "espesor_m": 0.10, "junta_m": 0.015, "unds_por_estiba": 280, "meta_pedido": 0},
+    {"nombre": "Catalán moreno P.H.", "clase": "PH", "largo_m": 0.30, "alto_m": 0.10,
+     "espesor_m": 0.15, "junta_m": 0.015, "unds_por_estiba": 280, "meta_pedido": 0},
 ]
 
 
@@ -126,7 +131,7 @@ def hiladas_muro(alto_muro_m: float, alto_bloque_m: float,
 
 
 def bloques_teoricos_muro(largo_m: float, alto_m: float, num_dovelas: int,
-                          bloque_pv: dict, bloque_ph: dict | None = None,
+                          bloque_pv: dict | None, bloque_ph: dict | None = None,
                           uso: str = "Auto") -> dict:
     """Bloques teóricos de un muro, repartidos entre P.V. y P.H.
 
@@ -136,23 +141,33 @@ def bloques_teoricos_muro(largo_m: float, alto_m: float, num_dovelas: int,
       - Con divisorio y dovelas > 0 (uso "Auto")               → mixto:
             P.V. = dovelas × hiladas (capado al total) y P.H. = resto.
 
+    Acepta muro 100 % P.H. sin bloque P.V. (`bloque_pv=None`, `bloque_ph` dado y
+    `uso="P.H."`): usa el P.H. como base de hiladas/total y el teórico cae todo en
+    la columna P.H.
+
     Devuelve {"hiladas": int, "total": float, "pv": float, "ph": float}.
     Es una estimación geométrica: medios bloques y trabas se cubren con el
     factor de ajuste en la conciliación, no aquí.
     """
     modo = str(uso or "Auto").upper().replace(".", "").strip()
-    if largo_m <= 0 or alto_m <= 0 or not bloque_pv:
+    if largo_m <= 0 or alto_m <= 0 or (not bloque_pv and not bloque_ph):
         return {"hiladas": 0, "total": 0.0, "pv": 0.0, "ph": 0.0}
+
+    # Sin bloque P.V. el muro solo puede ser P.H. (relleno).
+    if not bloque_pv:
+        modo = "PH"
 
     es_ph = modo == "PH" or (modo != "PV" and bloque_ph is not None and num_dovelas <= 0)
     es_pv = not es_ph and (modo == "PV" or bloque_ph is None)
 
     # El total se calcula con el bloque predominante del muro.
     bloque_base = bloque_ph if (es_ph or not es_pv) and bloque_ph else bloque_pv
+    # Para las hiladas usa el P.V.; si no hay (muro solo P.H.), usa el P.H.
+    bloque_hilada = bloque_pv or bloque_ph
     total = round(largo_m * alto_m * bloques_por_m2(
         bloque_base["largo_m"], bloque_base["alto_m"], bloque_base.get("junta_m", 0.015)
     ), 1)
-    hiladas = hiladas_muro(alto_m, bloque_pv["alto_m"], bloque_pv.get("junta_m", 0.015))
+    hiladas = hiladas_muro(alto_m, bloque_hilada["alto_m"], bloque_hilada.get("junta_m", 0.015))
 
     if es_ph:
         return {"hiladas": hiladas, "total": total, "pv": 0.0, "ph": total}
@@ -239,6 +254,200 @@ def conciliacion(df_reg: pd.DataFrame, df_sal: pd.DataFrame,
     return out[cols_out].sort_values(dims).reset_index(drop=True)
 
 
+# ── Calculadora de muro (réplica del Excel) ─────────────────────────
+def _semaforo_entrega(entregado: float, lim_verde: float, lim_rojo: float) -> str:
+    """VERDE/NARANJA/ROJO según los dos límites del umbral (×1 y ×1.5)."""
+    if entregado <= lim_verde:
+        return "VERDE"
+    if entregado <= lim_rojo:
+        return "NARANJA"
+    return "ROJO"
+
+
+def calculadora_muro(largo_m: float, alto_m: float, bloque: dict,
+                     junta_cm: float = 1.5, factor: float = 1.05,
+                     umbral_pct: float = UMBRAL_DESPERDICIO_PCT,
+                     entregado: float | None = None) -> dict:
+    """Calculadora de desperdicio de un muro de un solo tipo de bloque.
+
+    Réplica de la hoja "Calculadora de muro": módulo, bloques/m², área, teórico
+    geométrico y ajustado, límites del semáforo y desperdicio %.
+
+    Si `entregado` es None, las claves de desperdicio/semáforo quedan en NaN/"".
+    """
+    if not bloque or largo_m <= 0 or alto_m <= 0:
+        return {}
+    junta_m = float(junta_cm) / 100.0
+    largo_b = float(bloque["largo_m"])
+    alto_b = float(bloque["alto_m"])
+    modulo = (largo_b + junta_m) * (alto_b + junta_m)
+    bloques_m2 = 1.0 / modulo if modulo > 0 else float("nan")
+    area = largo_m * alto_m
+    teorico_geom = area * bloques_m2
+    teorico_ajustado = teorico_geom * float(factor)
+    lim_verde = teorico_ajustado * (1 + umbral_pct / 100.0)
+    lim_rojo = teorico_ajustado * (1 + 1.5 * umbral_pct / 100.0)
+
+    res = {
+        "modulo": modulo,
+        "bloques_m2": bloques_m2,
+        "area": area,
+        "teorico_geom": teorico_geom,
+        "teorico_ajustado": teorico_ajustado,
+        "lim_verde": lim_verde,
+        "lim_rojo": lim_rojo,
+        "desp_pct_ajustado": float("nan"),
+        "desp_pct_geom": float("nan"),
+        "semaforo": "",
+    }
+    if entregado is not None:
+        ent = float(entregado)
+        res["desp_pct_ajustado"] = desperdicio_pct(ent, teorico_ajustado)
+        res["desp_pct_geom"] = desperdicio_pct(ent, teorico_geom)
+        res["semaforo"] = _semaforo_entrega(ent, lim_verde, lim_rojo)
+    return res
+
+
+def calculadora_combinado(largo_m: float, alto_m: float, uso: str,
+                          num_dovelas: int, bloque_pv: dict | None,
+                          bloque_ph: dict | None = None, junta_cm: float = 1.5,
+                          factor: float = 1.05,
+                          umbral_pct: float = UMBRAL_DESPERDICIO_PCT,
+                          entregado_pv: float | None = None,
+                          entregado_ph: float | None = None) -> dict:
+    """Control de un muro combinado P.V. (dovelas) + P.H. (relleno).
+
+    Réplica de la hoja "Muro combinado": el total se calcula con el bloque P.V.
+    (`MIN(dovelas×hiladas, total)` para el P.V., resto para el P.H.). `uso` acepta
+    "Combinado"/"Vertical"/"Horizontal" (o "Auto"/"P.V."/"P.H."). Devuelve el
+    teórico y, si hay entregado, el desperdicio % y el semáforo por cada tipo.
+    """
+    if largo_m <= 0 or alto_m <= 0 or (not bloque_pv and not bloque_ph):
+        return {}
+    modo = str(uso or "").upper()
+    es_vertical = "VERTIC" in modo or modo in ("P.V.", "PV")
+    es_horizontal = "HORIZ" in modo or modo in ("P.H.", "PH")
+
+    junta_m = float(junta_cm) / 100.0
+    area = largo_m * alto_m
+    # Bloque base de la geometría: el P.V. manda; si solo hay P.H., el P.H.
+    base = bloque_pv or bloque_ph
+    bloques_m2 = bloques_por_m2(base["largo_m"], base["alto_m"], junta_m)
+    hiladas = hiladas_muro(alto_m, base["alto_m"], junta_m)
+    total = area * bloques_m2
+
+    if es_vertical or not bloque_ph:
+        pv_teo, ph_teo = total, 0.0
+    elif es_horizontal or not bloque_pv:
+        pv_teo, ph_teo = 0.0, total
+    else:  # combinado
+        pv_teo = min(float(max(num_dovelas, 0)) * hiladas, total)
+        ph_teo = total - pv_teo
+
+    def _lado(teo: float, entregado: float | None) -> dict:
+        ajustado = teo * float(factor)
+        lim_v = ajustado * (1 + umbral_pct / 100.0)
+        lim_r = ajustado * (1 + 1.5 * umbral_pct / 100.0)
+        d = {"teorico": teo, "ajustado": ajustado, "lim_verde": lim_v,
+             "lim_rojo": lim_r, "desp_pct": float("nan"), "semaforo": ""}
+        if entregado is not None:
+            ent = float(entregado)
+            d["desp_pct"] = desperdicio_pct(ent, ajustado)
+            d["semaforo"] = _semaforo_entrega(ent, lim_v, lim_r) if ajustado > 0 else ""
+        return d
+
+    return {
+        "area": area, "bloques_m2": bloques_m2, "hiladas": hiladas, "total": total,
+        "pv": _lado(round(pv_teo, 1), entregado_pv),
+        "ph": _lado(round(ph_teo, 1), entregado_ph),
+    }
+
+
+def resumen_pedido_por_tipo(df_reg: pd.DataFrame, catalogo: list,
+                            apto: str | None = None, factor: float = 1.0,
+                            umbral_pct: float = 0.0,
+                            dim_apto: str = "Zona") -> dict:
+    """Resumen de bloques teóricos por tipo, para el pedido (réplica de la hoja
+    "Total por tipo" → RESUMEN POR TIPO).
+
+    Agrupa el teórico ya guardado (`Bloques_PV_teo`/`Bloques_PH_teo`) por
+    `dim_apto` (por defecto la Zona/apto) y por tipo. Por cada tipo del catálogo:
+      - Total_apto  : teórico del apto seleccionado (filtro).
+      - Total_obra  : teórico de TODA la obra.
+      - Con_factor  : Total_obra × factor (cortes/medios bloques).
+      - A_pedir     : ceil(Con_factor × (1 + umbral/100)), redondeo hacia arriba.
+    Devuelve {"por_tipo": DataFrame, "totales": {pv/ph/general: {...}}}.
+    `Con_factor`/`A_pedir` se calculan sobre Total_obra (pedido de toda la obra),
+    igual que el Excel.
+    """
+    import math
+
+    cols = ["Tipo_bloque", "Clase", "Total_apto", "Total_obra",
+            "Con_factor", "A_pedir"]
+    catalogo = catalogo or []
+    clase_de = {b.get("nombre"): b.get("clase", "PV") for b in catalogo}
+
+    teo = teorico_por_tipo(df_reg, dims=[dim_apto]) if df_reg is not None else None
+    if teo is None or teo.empty:
+        obra = pd.Series(dtype=float)
+        apto_s = pd.Series(dtype=float)
+    else:
+        obra = teo.groupby("Tipo_bloque")["Teorico"].sum()
+        if apto:
+            apto_s = (teo[teo[dim_apto] == apto]
+                      .groupby("Tipo_bloque")["Teorico"].sum())
+        else:
+            apto_s = pd.Series(dtype=float)
+
+    def _a_pedir(con_factor: float) -> int:
+        return int(math.ceil(con_factor * (1 + umbral_pct / 100.0)))
+
+    filas = []
+    for b in catalogo:
+        nombre = b.get("nombre")
+        t_obra = float(obra.get(nombre, 0.0))
+        t_apto = float(apto_s.get(nombre, 0.0))
+        con_f = t_obra * float(factor)
+        filas.append({
+            "Tipo_bloque": nombre, "Clase": b.get("clase", "PV"),
+            "Total_apto": round(t_apto, 1), "Total_obra": round(t_obra, 1),
+            "Con_factor": round(con_f, 1), "A_pedir": _a_pedir(con_f),
+        })
+    por_tipo = pd.DataFrame(filas, columns=cols)
+
+    totales = {}
+    for clave, clase in (("pv", "PV"), ("ph", "PH"), ("general", None)):
+        sub = por_tipo if clase is None else por_tipo[por_tipo["Clase"] == clase]
+        t_obra = float(sub["Total_obra"].sum())
+        con_f = t_obra * float(factor)
+        totales[clave] = {
+            "Total_apto": round(float(sub["Total_apto"].sum()), 1),
+            "Total_obra": round(t_obra, 1),
+            "Con_factor": round(con_f, 1),
+            "A_pedir": _a_pedir(con_f),
+        }
+    return {"por_tipo": por_tipo, "totales": totales}
+
+
+def rendimiento_por_junta(catalogo: list, juntas_cm: list | None = None) -> pd.DataFrame:
+    """Tabla de rendimiento (und/m² sin desperdicio) por bloque y espesor de junta.
+
+    Réplica de la hoja "Referencia": para cada bloque del catálogo calcula los
+    bloques/m² a cada junta de `juntas_cm` (por defecto `JUNTAS_CM`).
+    """
+    juntas = juntas_cm if juntas_cm is not None else JUNTAS_CM
+    cols = ["Bloque"] + [f"{j:g} cm" for j in juntas]
+    filas = []
+    for b in (catalogo or []):
+        fila = {"Bloque": b.get("nombre")}
+        for j in juntas:
+            fila[f"{j:g} cm"] = round(
+                bloques_por_m2(b["largo_m"], b["alto_m"], float(j) / 100.0), 1
+            )
+        filas.append(fila)
+    return pd.DataFrame(filas, columns=cols)
+
+
 def validar_catalogo(crudo) -> list[dict]:
     """Limpia un catálogo crudo (JSON/editor): descarta entradas inválidas y
     completa con valores por defecto. Devuelve [] si nada es rescatable."""
@@ -312,7 +521,7 @@ def construir_filas_grupo(base: dict, muros: list, sacos_total: float,
             "Cumple_meta": bool(cumple),
             "Grupo_id": grupo_id,
         }
-        if bloque_pv:
+        if bloque_pv or bloque_ph:
             teo = bloques_teoricos_muro(
                 m["Largo_m"], m["Alto_m"], int(m.get("Num_dovelas", 0)),
                 bloque_pv, bloque_ph, uso=m.get("Uso", "Auto"),

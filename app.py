@@ -22,17 +22,22 @@ from data_backend import (
     leer_salidas, agregar_salidas,
     leer_entradas, agregar_entradas,
     leer_estibas, agregar_estibas,
+    leer_conteos, agregar_conteos,
     eliminar_entradas, eliminar_salidas, eliminar_estibas,
     leer_catalogo, guardar_catalogo,
     leer_valores_ocultos, guardar_valores_ocultos,
 )
-from data_schema import COLUMNAS_SALIDAS, COLUMNAS_ENTRADAS, COLUMNAS_ESTIBAS
+from data_schema import (
+    COLUMNAS_SALIDAS, COLUMNAS_ENTRADAS, COLUMNAS_ESTIBAS, COLUMNAS_CONTEOS,
+)
 from calculos import (
     TEORICO_SAC_M2, KG_POR_SACO,
-    UMBRAL_DESPERDICIO_PCT, FACTOR_AJUSTE_BLOQUES,
+    UMBRAL_DESPERDICIO_PCT, FACTOR_AJUSTE_BLOQUES, JUNTAS_CM,
     consumo_ratio, consumo_por, resumen_por,
     construir_filas_grupo, cumple_meta,
     bloques_teoricos_muro, conciliacion,
+    calculadora_muro, calculadora_combinado, resumen_pedido_por_tipo,
+    rendimiento_por_junta,
 )
 import auth_supabase as auth
 
@@ -103,6 +108,11 @@ def cargar_entradas_cached() -> pd.DataFrame:
 @st.cache_data(ttl=60, show_spinner="Cargando estibas devueltas…")
 def cargar_estibas_cached() -> pd.DataFrame:
     return leer_estibas()
+
+
+@st.cache_data(ttl=60, show_spinner="Cargando conteos de piso…")
+def cargar_conteos_cached() -> pd.DataFrame:
+    return leer_conteos()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -217,6 +227,23 @@ def _bloques_clase(clase: str) -> list:
 
 def _bloque_por_nombre(nombre: str):
     return next((b for b in _catalogo() if b.get("nombre") == nombre), None)
+
+
+def _bloque_con_junta(bloque: dict | None, junta_cm: float):
+    """Copia del bloque con la junta (cm) elegida en obra sobreescribiendo la del
+    catálogo, para que el teórico use la pega real del muro."""
+    if not bloque:
+        return None
+    return {**bloque, "junta_m": float(junta_cm) / 100.0}
+
+
+# Opciones de "uso del muro" (como la hoja "Muro combinado" del Excel) y su
+# mapeo al parámetro `uso` de `bloques_teoricos_muro` (P.V./P.H./Auto).
+USO_COMBINADO = "Combinado (P.V.+P.H.)"
+USO_VERTICAL = "Vertical (solo P.V.)"
+USO_HORIZONTAL = "Horizontal (solo P.H.)"
+USOS_MURO = [USO_COMBINADO, USO_VERTICAL, USO_HORIZONTAL]
+_USO_A_MODO = {USO_COMBINADO: "Auto", USO_VERTICAL: "P.V.", USO_HORIZONTAL: "P.H."}
 
 
 def estado_presencia(dias_sin_venir: int) -> str:
@@ -438,44 +465,67 @@ def pagina_ingreso(df: pd.DataFrame):
         ayudante = campo_con_nuevo("Ayudante (opcional)", ayudantes, f"ayudante_{n}",
                                    opcional=True)
 
-    # Fila 3 — Ubicación y tipos de bloque (estructural P.V. + divisorio P.H.)
+    # Fila 3 — Apto/Zona, uso del muro y junta de pega (como el Excel)
     cat_pv = _bloques_clase("PV")
     cat_ph = _bloques_clase("PH")
-    NINGUNO_PH = "— Ninguno —"
+    hay_catalogo = bool(cat_pv or cat_ph)
     c6, c7, c8 = st.columns([2, 1, 1])
     with c6:
-        zona = st.text_input("Zona / Ubicación", placeholder="Ej: ÚTIL 055, CIERRE RAMPA EJE 9",
-                             key=f"in_zona_{n}")
+        zona = st.text_input("Apto / Zona", placeholder="Ej: APART 501, ÚTIL 055",
+                             key=f"in_zona_{n}",
+                             help="Sirve para el control 'cuántos bloques por apto'.")
     with c7:
-        if cat_pv:
-            tipo_ladrillo = st.selectbox(
-                "Bloque estructural (P.V.) *", [b["nombre"] for b in cat_pv],
-                key=f"sel_ladrillo_pv_{n}",
-                help="Bloque de perforación vertical: el de las columnas de dovela.",
-            )
-        else:
-            # Sin catálogo: texto libre como antes (sin bloques teóricos).
-            tipo_ladrillo = campo_con_nuevo("Tipo de ladrillo", ladrillos, f"ladrillo_{n}")
+        uso_muro = st.selectbox(
+            "Uso del muro *", USOS_MURO, key=f"in_uso_{n}",
+            help="Combinado: el bloque P.V. va en las dovelas y el P.H. rellena el "
+                 "resto. O fuerza todo P.V. (vertical) o todo P.H. (horizontal).",
+        )
     with c8:
-        tipo_ph = ""
-        if cat_ph:
-            sel_ph = st.selectbox(
-                "Bloque divisorio (P.H.)", [NINGUNO_PH] + [b["nombre"] for b in cat_ph],
-                key=f"sel_ladrillo_ph_{n}",
-                help="Elígelo si el muro lleva bloque de perforación horizontal además "
-                     "del P.V. (muro mixto). En — Ninguno —, el muro se calcula 100% P.V.",
-            )
-            tipo_ph = "" if sel_ph == NINGUNO_PH else sel_ph
+        junta_cm = st.selectbox(
+            "Junta de pega (cm) *", JUNTAS_CM, index=JUNTAS_CM.index(1.5),
+            key=f"in_junta_{n}",
+            help="Espesor de la pega. En Serrania la real es 1.5 cm.",
+        )
+
+    # Fila 4 — bloque(s) según el uso elegido (P.V. para dovelas, P.H. para relleno)
+    tipo_ladrillo, tipo_ph = "", ""
+    necesita_pv = uso_muro in (USO_COMBINADO, USO_VERTICAL)
+    necesita_ph = uso_muro in (USO_COMBINADO, USO_HORIZONTAL)
+    if hay_catalogo:
+        cb1, cb2 = st.columns(2)
+        with cb1:
+            if necesita_pv and cat_pv:
+                tipo_ladrillo = st.selectbox(
+                    "Bloque P.V. (dovelas) *", [b["nombre"] for b in cat_pv],
+                    key=f"sel_pv_{n}",
+                    help="Bloque de perforación vertical: el de las columnas de dovela.",
+                )
+        with cb2:
+            if necesita_ph and cat_ph:
+                tipo_ph = st.selectbox(
+                    "Bloque P.H. (relleno) *", [b["nombre"] for b in cat_ph],
+                    key=f"sel_ph_{n}",
+                    help="Bloque de perforación horizontal: el divisorio que rellena el muro.",
+                )
+    else:
+        # Sin catálogo (muy raro): texto libre como antes, sin bloques teóricos.
+        tipo_ladrillo = campo_con_nuevo("Tipo de ladrillo", ladrillos, f"ladrillo_{n}")
+
+    # Modo para `bloques_teoricos_muro` y bloques con la junta real de este muro.
+    modo_uso = _USO_A_MODO[uso_muro]
+    bloque_pv = _bloque_con_junta(_bloque_por_nombre(tipo_ladrillo), junta_cm) if tipo_ladrillo else None
+    bloque_ph = _bloque_con_junta(_bloque_por_nombre(tipo_ph), junta_cm) if tipo_ph else None
 
     # Sección: muros del registro (uno o varios que comparten el total de sacos)
     st.subheader("Muros y materiales")
     st.caption(
         "Agrega **una fila por muro**. El **# de sacos es el TOTAL para todos los "
         "muros** de la tabla (no por muro): el consumo se calcula como "
-        "sacos ÷ m² del conjunto, tal como la celda combinada en Excel."
+        "sacos ÷ m² del conjunto, tal como la celda combinada en Excel. "
+        "Las **# Dovelas** solo cuentan en muros **combinados** (reparten P.V./P.H.)."
     )
 
-    muros_init = pd.DataFrame([{"Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0, "Uso": "Auto"}])
+    muros_init = pd.DataFrame([{"Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0}])
     editado = st.data_editor(
         muros_init,
         num_rows="dynamic",
@@ -485,11 +535,6 @@ def pagina_ingreso(df: pd.DataFrame):
             "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
             "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
             "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
-            "Uso": st.column_config.SelectboxColumn(
-                "Uso bloque", options=["Auto", "P.V.", "P.H."], default="Auto",
-                help="Auto: P.V. en las columnas de dovela y P.H. en el resto (si elegiste "
-                     "divisorio). Fuerza P.V. o P.H. para muros 100% de un solo tipo.",
-            ),
         },
     )
 
@@ -502,11 +547,11 @@ def pagina_ingreso(df: pd.DataFrame):
     with s2:
         observaciones = st.text_input("Observaciones", key=f"in_obs_{n}")
 
-    # Muros válidos (Largo y Alto > 0)
+    # Muros válidos (Largo y Alto > 0). El uso es del registro (no por fila).
     muros = [
         {"Largo_m": float(r.Largo_m), "Alto_m": float(r.Alto_m),
          "Num_dovelas": int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0,
-         "Uso": str(r.Uso) if pd.notna(getattr(r, "Uso", None)) else "Auto"}
+         "Uso": modo_uso}
         for r in editado.itertuples()
         if pd.notna(r.Largo_m) and pd.notna(r.Alto_m) and r.Largo_m > 0 and r.Alto_m > 0
     ]
@@ -520,32 +565,40 @@ def pagina_ingreso(df: pd.DataFrame):
     consumo_kg_m2 = round(consumo_real * _kg(), 2)
     cumple = cumple_meta(consumo_real, m2_total, sacos_total, meta=_meta())
 
-    # Bloques teóricos por tipo (solo si el tipo elegido está en el catálogo)
-    bloque_pv = _bloque_por_nombre(tipo_ladrillo)
-    bloque_ph = _bloque_por_nombre(tipo_ph) if tipo_ph else None
-    fila_bloques = ""
-    if bloque_pv and muros:
+    # Resumen geométrico de bloques (módulo, bloques/m², teórico) como el Excel.
+    factor = _factor_ajuste()
+    filas_bloques = ""
+    bloque_disp = bloque_pv or bloque_ph   # bloque "principal" para módulo/rendimiento
+    if bloque_disp and muros:
         teos = [
             bloques_teoricos_muro(m["Largo_m"], m["Alto_m"], m["Num_dovelas"],
-                                  bloque_pv, bloque_ph, uso=m["Uso"])
+                                  bloque_pv, bloque_ph, uso=modo_uso)
             for m in muros
         ]
         pv_total = sum(t["pv"] for t in teos)
         ph_total = sum(t["ph"] for t in teos)
-        fila_bloques = (
-            f"| Bloques teóricos (dovelas × hiladas) | "
-            f"**{pv_total:,.0f} P.V. + {ph_total:,.0f} P.H.** |\n"
+        total_geom = pv_total + ph_total
+        junta_m = float(junta_cm) / 100.0
+        modulo = (bloque_disp["largo_m"] + junta_m) * (bloque_disp["alto_m"] + junta_m)
+        rendim = 1.0 / modulo if modulo > 0 else float("nan")
+        filas_bloques = (
+            f"| Módulo bloque+junta ({bloque_disp['nombre']}, junta {junta_cm:g} cm) "
+            f"| **{modulo:.6f} m²** |\n"
+            f"| Bloques por m² | **{rendim:.2f} und/m²** |\n"
+            f"| Teórico geométrico (bloques) | **{total_geom:,.0f}** |\n"
+            f"| Teórico ajustado (× factor {factor:g}) | **{total_geom * factor:,.0f}** |\n"
+            f"| Reparto teórico | **{pv_total:,.0f} P.V. + {ph_total:,.0f} P.H.** |\n"
         )
 
     estado_txt = "✓ SÍ" if cumple else "✗ NO"
     st.info(
-        f"""**⚡ Calculado automáticamente** — grupo de **{n_muros}** muro(s)
+        f"""**⚡ Calculado automáticamente** — grupo de **{n_muros}** muro(s) · uso **{uso_muro}**
 
 | Indicador | Valor |
 |---|---|
 | M² ejecutados (Σ Largo × Alto) | **{m2_total:.2f} m²** |
 | ML dovelas (Σ # Dovelas × Alto) | **{ml_total:.2f} ml** |
-{fila_bloques}| Consumo real ({sacos_total:.1f} sacos ÷ {m2_total:.2f} m²) | **{consumo_real:.3f} sac/m²** |
+{filas_bloques}| Consumo real ({sacos_total:.1f} sacos ÷ {m2_total:.2f} m²) | **{consumo_real:.3f} sac/m²** |
 | Mortero por m² ({consumo_real:.3f} sac/m² × {_kg():g} kg/saco) | **{consumo_kg_m2:.1f} kg/m²** |
 | Mortero TOTAL del grupo ({sacos_total:.1f} sacos × {_kg():g} kg/saco) | **{consumo_kg:.1f} kg** |
 | Cumple meta (≤ {_meta():g}) | **{estado_txt}** |
@@ -563,6 +616,10 @@ def pagina_ingreso(df: pd.DataFrame):
             errores.append("El campo **Piso** es obligatorio.")
         if n_muros == 0:
             errores.append("Agrega al menos un muro con **Largo** y **Alto** mayores que 0.")
+        if hay_catalogo and necesita_pv and not tipo_ladrillo:
+            errores.append("Elige el **Bloque P.V.** (lo pide el uso del muro).")
+        if hay_catalogo and necesita_ph and not tipo_ph:
+            errores.append("Elige el **Bloque P.H.** (lo pide el uso del muro).")
 
         if errores:
             for e in errores:
@@ -572,7 +629,8 @@ def pagina_ingreso(df: pd.DataFrame):
         # Guardia anti doble clic: un payload idéntico al recién guardado es un
         # doble envío, no un registro nuevo.
         firma = repr((str(fecha), oficial, ayudante, sector, piso, zona,
-                      tipo_ladrillo, tipo_ph, observaciones, float(sacos_total), muros))
+                      uso_muro, junta_cm, tipo_ladrillo, tipo_ph,
+                      observaciones, float(sacos_total), muros))
         ult = st.session_state.get("ultimo_registro_firma")
         if ult and ult[0] == firma and datetime.now().timestamp() - ult[1] < 120:
             st.warning(
@@ -1310,6 +1368,39 @@ def _resumen_almacen(df_ent: pd.DataFrame, df_sal: pd.DataFrame) -> pd.DataFrame
     return pd.DataFrame(filas)
 
 
+def _avance_pedido(df_ent: pd.DataFrame, catalogo: list) -> pd.DataFrame:
+    """Tabla por tipo: recibido (suma de TODAS las entradas) vs el TECHO del pedido
+    (`meta_pedido` del catálogo) → % de avance del pedido a la ladrillera.
+
+    Es la versión en vivo del "PEDIDOS RESUMEN" que se llevaba en el Excel Control
+    ladrillo. El techo es el total previsto para la torre: un TOPE de gasto, no un
+    objetivo exacto. Solo aparecen los tipos con techo o con material recibido."""
+    if df_ent is None or df_ent.empty or "Tipo_bloque" not in df_ent.columns:
+        rec = {}
+    else:
+        s = df_ent.copy()
+        s["Cantidad"] = pd.to_numeric(s["Cantidad"], errors="coerce")
+        rec = s.groupby("Tipo_bloque")["Cantidad"].sum().to_dict()
+
+    filas = []
+    for b in catalogo or []:
+        nombre = str(b.get("nombre", "")).strip()
+        if not nombre:
+            continue
+        techo = float(b.get("meta_pedido", 0) or 0)
+        recibido = float(rec.get(nombre, 0.0))
+        if techo <= 0 and recibido == 0:
+            continue  # sin techo ni movimiento: no aporta
+        filas.append({
+            "Tipo de bloque": nombre,
+            "Recibido": recibido,
+            "Techo (pedido)": techo if techo > 0 else float("nan"),
+            "% avance": (recibido / techo) if techo > 0 else float("nan"),
+            "Pendiente": max(techo - recibido, 0.0) if techo > 0 else float("nan"),
+        })
+    return pd.DataFrame(filas)
+
+
 def _form_entrada(df_ent: pd.DataFrame, catalogo: list):
     """Formulario de ENTRADA de almacén (compras recibidas del proveedor).
 
@@ -1327,7 +1418,7 @@ def _form_entrada(df_ent: pd.DataFrame, catalogo: list):
         return
 
     proveedores = opciones_unicas(df_ent, "Proveedor")
-    with st.form("form_entrada"):
+    with st.form("form_entrada", clear_on_submit=True):
         e1, e2, e3 = st.columns(3)
         with e1:
             fecha_e = st.date_input("Fecha de la entrada *", value=datetime.now().date(),
@@ -1434,7 +1525,7 @@ def _form_salida(df: pd.DataFrame, df_sal: pd.DataFrame, nombres_bloques: list):
         st.warning("El catálogo de bloques está vacío: pide al admin configurarlo abajo.")
         return
 
-    with st.form("form_salida"):
+    with st.form("form_salida", clear_on_submit=True):
         v1, v2, v3 = st.columns(3)
         with v1:
             fecha_s = st.date_input("Fecha de la salida *", value=datetime.now().date(),
@@ -1586,7 +1677,7 @@ def _form_estibas_dev(df_est: pd.DataFrame) -> None:
     Ledger APARTE del material: las estibas devueltas no están ligadas al pedido
     ni a los ladrillos y NO afectan el stock de bloque. Solo control de pallets."""
     proveedores = opciones_unicas(df_est, "Proveedor")
-    with st.form("form_estibas"):
+    with st.form("form_estibas", clear_on_submit=True):
         d1, d2, d3 = st.columns(3)
         with d1:
             fecha_d = st.date_input("Fecha *", value=datetime.now().date(),
@@ -1711,6 +1802,45 @@ def _tab_movimientos(df: pd.DataFrame, df_ent: pd.DataFrame, df_sal: pd.DataFram
         st.caption(
             "**Stock almacén = Recibido − Entregado** (inventario teórico que queda). "
             "Stock negativo = se entregó más de lo recibido: revisa entradas faltantes."
+        )
+
+    # ── Avance del pedido a la ladrillera (recibido vs techo) ─────
+    avance = _avance_pedido(df_ent, catalogo)
+    if not avance.empty:
+        st.divider()
+        st.subheader("🎯 Avance del pedido (recibido vs techo)")
+        st.caption(
+            "Suma de **todo lo recibido** por tipo contra el **techo del pedido** de la "
+            "torre (el *TOTAL PEDIDO* que se llevaba en el Excel *Control ladrillo*). El "
+            "techo es un **tope de gasto previsto**, no un objetivo exacto. "
+            "**% avance = recibido ÷ techo**; 🔴 = ya se pasó del techo."
+        )
+
+        def _estado_av(p):
+            if pd.isna(p):
+                return "(sin techo)"
+            if p > 1:
+                return "🔴 pasó el techo"
+            if p >= 0.9:
+                return "🟠 cerca"
+            return "🟢 ok"
+
+        vis = avance.copy()
+        vis["Estado"] = vis["% avance"].apply(_estado_av)
+        con_techo = avance[avance["Techo (pedido)"].notna()]
+        if not con_techo.empty:
+            tot_techo = con_techo["Techo (pedido)"].sum()
+            tot_rec = con_techo["Recibido"].sum()
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Techo total (pedido)", f"{tot_techo:,.0f} und")
+            a2.metric("Recibido total", f"{tot_rec:,.0f} und")
+            a3.metric("Avance global", f"{(tot_rec / tot_techo if tot_techo else 0):.0%}")
+        st.dataframe(
+            vis.style.format({
+                "Recibido": "{:,.0f}", "Techo (pedido)": "{:,.0f}",
+                "% avance": "{:.0%}", "Pendiente": "{:,.0f}",
+            }, na_rep="—"),
+            width="stretch", hide_index=True,
         )
 
     # ── Entradas y salidas combinadas ─────────────────────────────
@@ -2003,6 +2133,230 @@ def _corregir_movimientos(df_ent: pd.DataFrame, df_sal: pd.DataFrame,
             st.session_state["del_mov_nonce"] = nd + 1
             st.toast(f"Eliminado(s) {borradas} movimiento(s) ✅")
             st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────
+# Pantalla — Control por piso (el "corte": entró − queda = gastado vs teórico)
+# ─────────────────────────────────────────────────────────────
+def _conteo_ultimo_por_tipo(df_con: pd.DataFrame, hasta=None) -> pd.DataFrame:
+    """Último conteo físico (lo que QUEDA) por Sector/Piso/Tipo_bloque.
+
+    Si un piso/tipo tiene varios conteos, toma el MÁS RECIENTE (la última foto del
+    sobrante). `hasta` limita a conteos en/antes de esa fecha (el cierre del corte)."""
+    cols = ["Sector", "Piso", "Tipo_bloque", "Queda"]
+    if df_con is None or df_con.empty:
+        return pd.DataFrame(columns=cols)
+    c = df_con.copy()
+    c["Cantidad"] = pd.to_numeric(c["Cantidad"], errors="coerce")
+    c["Fecha"] = pd.to_datetime(c["Fecha"], errors="coerce")
+    if hasta is not None:
+        c = c[c["Fecha"] <= pd.to_datetime(hasta)]
+    c = c.dropna(subset=["Cantidad"])
+    for d in ("Sector", "Piso", "Tipo_bloque"):
+        c[d] = c[d].fillna("").astype(str).str.strip()
+    if c.empty:
+        return pd.DataFrame(columns=cols)
+    c = c.sort_values("Fecha").groupby(
+        ["Sector", "Piso", "Tipo_bloque"], as_index=False).last()
+    return c[["Sector", "Piso", "Tipo_bloque", "Cantidad"]].rename(
+        columns={"Cantidad": "Queda"})
+
+
+def _form_conteo(df: pd.DataFrame, catalogo: list):
+    """Formulario del conteo físico del sobrante (el corte de cada piso)."""
+    nombres = [b["nombre"] for b in catalogo]
+    if not nombres:
+        st.warning("El catálogo de bloques está vacío: pide al admin configurarlo.")
+        return
+    with st.form("form_conteo", clear_on_submit=True):
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            fecha = st.date_input("Fecha del corte *", value=datetime.now().date(),
+                                  key="con_fecha")
+        with k2:
+            sectores = ["Torre", "Plataforma"] + [
+                s for s in opciones_visibles(df, "Sector")
+                if s not in ("Torre", "Plataforma")]
+            sector = st.selectbox("Sector *", sectores, key="con_sector")
+        with k3:
+            piso = st.text_input("Piso *", placeholder="Ej: 5", key="con_piso")
+        k4, k5 = st.columns(2)
+        with k4:
+            tipo = st.selectbox("Tipo de bloque *", nombres, key="con_tipo")
+        with k5:
+            cantidad = st.number_input(
+                "Sobrante contado (unidades) *", min_value=0.0, step=1.0,
+                format="%.0f", key="con_cant",
+                help="Lo que QUEDÓ físico en el piso ese día (lo que cuentas en el corte).")
+        obs = st.text_input("Observaciones", key="con_obs")
+        enviar = st.form_submit_button("💾 Guardar conteo", type="primary")
+
+    if enviar:
+        if not piso.strip():
+            st.error("El campo **Piso** es obligatorio.")
+            return
+        fila = pd.DataFrame([{
+            "Fecha": pd.to_datetime(fecha),
+            "Sector": sector,
+            "Piso": piso.strip(),
+            "Tipo_bloque": tipo,
+            "Cantidad": float(cantidad),
+            "Observaciones": obs.strip(),
+            "Timestamp_registro": datetime.now(),
+        }])[COLUMNAS_CONTEOS]
+        try:
+            with st.spinner("Guardando…"):
+                agregar_conteos(fila)
+            cargar_conteos_cached.clear()
+        except Exception as e:
+            st.error(f"No se pudo guardar el conteo: {e}")
+            return
+        st.session_state["flash_conteo"] = (
+            f"Conteo guardado · piso {piso.strip()} · {tipo} · {cantidad:,.0f} sobrantes.")
+        for k in ("con_fecha", "con_sector", "con_piso", "con_tipo", "con_cant", "con_obs"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+
+def pagina_control_piso(df: pd.DataFrame):
+    """Control por piso (el 'corte'): cruza ENTRÓ (salidas) − QUEDA (conteo) =
+    GASTADO contra el TEÓRICO (muros), por piso y tipo, todo automático."""
+    st.header("📍 Control por piso (corte)")
+    if "flash_conteo" in st.session_state:
+        st.success(st.session_state.pop("flash_conteo"))
+
+    try:
+        df_sal = cargar_salidas_cached()
+    except Exception:
+        df_sal = pd.DataFrame(columns=COLUMNAS_SALIDAS)
+    try:
+        df_ent = cargar_entradas_cached()
+    except Exception:
+        df_ent = pd.DataFrame(columns=COLUMNAS_ENTRADAS)
+    try:
+        df_con = cargar_conteos_cached()
+    except Exception:
+        df_con = pd.DataFrame(columns=COLUMNAS_CONTEOS)
+        st.info("Si usas Supabase, corre la sección nueva de `supabase_schema.sql` "
+                "(tabla `almacen_conteos`) para poder guardar los conteos.")
+
+    catalogo = _catalogo()
+    factor = _factor_ajuste()
+    umbral = _umbral_pct()
+
+    st.caption(
+        "El **corte** de cada piso: **Entró** (salidas de almacén al piso) − **Queda** "
+        "(lo que cuentas físico) = **Gastado**, contra el **Teórico** de los muros. "
+        f"Teórico ajustado = teórico × {factor:g}. Semáforo: 🟢 ≤ {umbral:g} % · "
+        f"🟠 ≤ {1.5 * umbral:g} % · 🔴 mayor. Sin conteo, el corte es *aparente* "
+        "(no resta el sobrante).")
+
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        desde = st.date_input("Desde", value=None, key="cp_desde")
+    with f2:
+        hasta = st.date_input("Hasta (cierre del corte)", value=None, key="cp_hasta")
+    with f3:
+        sec_f = st.selectbox("Sector", ["Todos"] + opciones_unicas(df, "Sector"),
+                             key="cp_sector")
+
+    df_f = _filtrar_fechas(df, desde, hasta)
+    sal_f = _filtrar_fechas(df_sal, desde, hasta)
+    if sec_f != "Todos":
+        df_f = df_f[df_f["Sector"] == sec_f]
+        sal_f = sal_f[sal_f["Sector"] == sec_f]
+
+    conc = conciliacion(df_f, sal_f, dims=("Sector", "Piso", "Tipo_bloque"),
+                        factor_ajuste=factor)
+    if conc.empty:
+        st.info("Aún no hay salidas ni muros para cruzar en este filtro. Registra "
+                "movimientos de almacén y muros, y agrega un conteo abajo.")
+    else:
+        queda = _conteo_ultimo_por_tipo(df_con, hasta)
+        if sec_f != "Todos" and not queda.empty:
+            queda = queda[queda["Sector"] == sec_f]
+        t = conc.merge(queda, on=["Sector", "Piso", "Tipo_bloque"], how="left")
+        t["Queda"] = pd.to_numeric(t.get("Queda"), errors="coerce")
+        t["Gastado"] = (t["Entregado"] - t["Queda"]).round(1)
+        # Base del desperdicio: gastado si hubo conteo; si no, el entregado (aparente).
+        base = t["Gastado"].where(t["Queda"].notna(), t["Entregado"])
+        t["Desperdicio"] = (base - t["Teorico_ajustado"]).round(1)
+        t["Desp_pct"] = base.sub(t["Teorico_ajustado"]).div(
+            t["Teorico_ajustado"].where(t["Teorico_ajustado"] > 0))
+
+        def _sem(p):
+            if pd.isna(p):
+                return ""
+            if p <= umbral / 100:
+                return "🟢"
+            if p <= 1.5 * umbral / 100:
+                return "🟠"
+            return "🔴"
+
+        t["🚦"] = t["Desp_pct"].map(_sem)
+        t["Corte"] = t["Queda"].map(
+            lambda q: "real (con conteo)" if pd.notna(q) else "aparente")
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Entró total (al piso)", f"{t['Entregado'].sum():,.0f}")
+        k2.metric("Teórico total", f"{t['Teorico_ajustado'].sum():,.0f}")
+        gast = base.sum()
+        k3.metric("Desperdicio (vs teórico)", f"{gast - t['Teorico_ajustado'].sum():+,.0f}")
+
+        vista = t.rename(columns={
+            "Tipo_bloque": "Tipo", "Teorico_ajustado": "Teórico (aj.)",
+            "Entregado": "Entró", "Desp_pct": "Desp. %"})
+        cols = ["Sector", "Piso", "Tipo", "Entró", "Teórico (aj.)", "Queda",
+                "Gastado", "Desperdicio", "Desp. %", "🚦", "Corte"]
+        st.dataframe(
+            vista[cols].style.format({
+                "Entró": "{:,.0f}", "Teórico (aj.)": "{:,.1f}", "Queda": "{:,.0f}",
+                "Gastado": "{:,.1f}", "Desperdicio": "{:+,.1f}", "Desp. %": "{:+.1%}",
+            }, na_rep="—"),
+            width="stretch", hide_index=True)
+
+        # Gráfica por piso: Entró / Teórico / Gastado
+        try:
+            g = t.assign(_Gast=base).groupby("Piso", as_index=False).agg(
+                **{"Entró": ("Entregado", "sum"),
+                   "Teórico": ("Teorico_ajustado", "sum"),
+                   "Gastado": ("_Gast", "sum")})
+            if not g.empty:
+                st.bar_chart(g.set_index("Piso")[["Entró", "Teórico", "Gastado"]])
+        except Exception:
+            pass
+
+        # Sobrecosto P.V. (caro pegado donde iba P.H.)
+        pv = t[t["Tipo_bloque"].astype(str).str.upper().str.startswith("P.V")]
+        if not pv.empty:
+            base_pv = pv["Gastado"].where(pv["Queda"].notna(), pv["Entregado"])
+            extra = (base_pv - pv["Teorico_ajustado"]).clip(lower=0).sum()
+            if extra >= 1:
+                st.warning(
+                    f"⚠️ **Sobrecosto P.V.**: ~{extra:,.0f} bloques **P.V. (caros) de más** "
+                    "sobre el teórico — probablemente pegados donde iba P.H. (barato).")
+
+    st.divider()
+    avance = _avance_pedido(df_ent, catalogo)
+    if not avance.empty:
+        st.subheader("🎯 Avance del pedido (recibido vs techo)")
+        av = avance.copy()
+        for col in ("Recibido", "Techo (pedido)", "% avance", "Pendiente"):
+            av[col] = pd.to_numeric(av[col], errors="coerce")
+        av["Estado"] = av["% avance"].map(
+            lambda p: "(sin techo)" if pd.isna(p) else
+            ("🔴 pasó" if p > 1 else ("🟠 cerca" if p >= 0.9 else "🟢")))
+        st.dataframe(
+            av.style.format({
+                "Recibido": "{:,.0f}", "Techo (pedido)": "{:,.0f}",
+                "% avance": "{:.0%}", "Pendiente": "{:,.0f}"}, na_rep="—"),
+            width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("✍️ Registrar conteo del corte (lo que sobró en el piso)")
+    st.caption("Cuando hacen el corte (cada 15 días o al cerrar el piso), cuenta lo "
+               "que QUEDÓ físico por piso y tipo, y guárdalo aquí.")
+    _form_conteo(df, catalogo)
 
 
 def pagina_materiales(df: pd.DataFrame):
@@ -2325,6 +2679,357 @@ def pagina_last_planner(df: pd.DataFrame):
     st.info("🚧 En construcción. Pronto encontrarás aquí el plan semanal.")
 
 
+# ─────────────────────────────────────────────────────────────
+# Pantalla — Calculadora de mampostería (réplica del Excel)
+# ─────────────────────────────────────────────────────────────
+_SEMAFORO_EMOJI = {"VERDE": "🟢 VERDE", "NARANJA": "🟠 NARANJA", "ROJO": "🔴 ROJO"}
+
+
+def _fmt_pct(x: float) -> str:
+    return "—" if x is None or pd.isna(x) else f"{x * 100:.1f} %"
+
+
+def _calc_tab_muro(cat_pv: list, cat_ph: list):
+    """Calculadora de desperdicio de un muro (sandbox; no guarda nada)."""
+    st.caption(
+        "Cambia los valores y mira el desperdicio al instante. **No guarda** nada: "
+        "es la misma cuenta de las hojas *Calculadora de muro* y *Muro combinado* "
+        "del Excel, para estimar pedidos y revisar entregas."
+    )
+    modo = st.radio("Tipo de muro", ["Un solo tipo", "Combinado (P.V.+P.H.)"],
+                    horizontal=True, key="calc_modo")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        largo = st.number_input("Largo del muro (m)", min_value=0.0, value=4.5,
+                                step=0.05, format="%.2f", key="calc_largo")
+    with c2:
+        alto = st.number_input("Alto del muro (m)", min_value=0.0, value=2.40,
+                               step=0.05, format="%.2f", key="calc_alto")
+    with c3:
+        junta = st.selectbox("Junta de pega (cm)", JUNTAS_CM,
+                             index=JUNTAS_CM.index(1.5), key="calc_junta")
+
+    c4, c5 = st.columns(2)
+    with c4:
+        factor = st.number_input("Factor de ajuste", min_value=1.0, max_value=1.5,
+                                 value=max(round(_factor_ajuste(), 2), 1.05),
+                                 step=0.01, format="%.2f", key="calc_factor",
+                                 help="Sube el teórico por cortes/medios bloques (1.00–1.10).")
+    with c5:
+        umbral = st.number_input("Umbral desperdicio (%)", min_value=0.0,
+                                 value=round(_umbral_pct(), 1), step=0.5,
+                                 format="%.1f", key="calc_umbral",
+                                 help="Verde hasta el umbral; rojo por encima de umbral×1.5.")
+
+    if modo == "Un solo tipo":
+        nombres = [b["nombre"] for b in (cat_pv + cat_ph)]
+        if not nombres:
+            st.info("No hay bloques en el catálogo.")
+            return
+        cb1, cb2 = st.columns([2, 1])
+        with cb1:
+            nombre = st.selectbox("Tipo de bloque", nombres, key="calc_bloque")
+        with cb2:
+            entregado = st.number_input(
+                "Simular entrega (bloques)",
+                min_value=0, value=0, step=1, key="calc_entregado",
+                help="Escribe cuántos bloques quieres simular que se entregan al apto — la app muestra el semáforo y el % de exceso al instante.",
+            )
+        bloque = _bloque_por_nombre(nombre)
+        ent_param = entregado if entregado > 0 else None
+        r = calculadora_muro(largo, alto, bloque, junta_cm=junta, factor=factor,
+                             umbral_pct=umbral, entregado=ent_param)
+        if not r:
+            st.info("Completa largo y alto del muro.")
+            return
+        m1, m2 = st.columns(2)
+        m1.metric("Teórico geométrico (Teoría)", f"{r['teorico_geom']:.0f} bloques",
+                  help="Cuántos bloques caben matemáticamente en el área del muro.")
+        m2.metric("Teórico ajustado (Real)", f"{r['teorico_ajustado']:.0f} bloques",
+                  help=f"Lo que debes pedir: Teoría × factor {factor:g} (incluye cortes y mermas).")
+        lim_verde_pct = umbral
+        lim_rojo_pct = umbral * 1.5
+        st.markdown(
+            f"""| Indicador | Valor |
+|---|---|
+| Módulo bloque+junta | **{r['modulo']:.6f} m²** |
+| Bloques por m² | **{r['bloques_m2']:.2f} und/m²** |
+| Área del muro | **{r['area']:.2f} m²** |
+| Teórico geométrico (Teoría) | **{r['teorico_geom']:.0f}** |
+| Teórico ajustado (Real) (× {factor:g}) | **{r['teorico_ajustado']:.0f}** |
+| 🟢 Normal hasta (umbral {lim_verde_pct:.1f} % sobre lo pedido) | **{r['lim_verde']:.0f} bloques** |
+| 🔴 Alerta máxima (umbral × 1.5 = {lim_rojo_pct:.1f} % sobre lo pedido) | **{r['lim_rojo']:.0f} bloques** |"""
+        )
+        if ent_param is not None:
+            desp_pct = r["desp_pct_ajustado"]
+            margen = r["lim_verde"] - entregado
+            if margen >= 0:
+                margen_txt = f"Margen disponible antes de NARANJA | **{margen:.0f} bloques**"
+            else:
+                margen_txt = f"Exceso sobre el límite normal | **{abs(margen):.0f} bloques de más**"
+            st.markdown(
+                f"""| Resultado de la simulación | Valor |
+|---|---|
+| Bloques simulados | **{entregado:.0f}** |
+| % simulado de exceso sobre lo pedido | **{_fmt_pct(desp_pct)}** |
+| Umbral permitido configurado | **{umbral:.1f} %** |
+| {margen_txt} |"""
+            )
+        else:
+            st.caption("Escribe un número en **Simular entrega** para ver el semáforo y el % de desperdicio.")
+        _badge_semaforo(r["semaforo"], entregado, r["lim_verde"], r["lim_rojo"], simulacion=True)
+        return
+
+    # Combinado P.V. + P.H.
+    if not cat_pv or not cat_ph:
+        st.info("Para el muro combinado necesitas bloques P.V. y P.H. en el catálogo.")
+        return
+    cc1, cc2, cc3 = st.columns(3)
+    with cc1:
+        nombre_pv = st.selectbox("Bloque P.V. (dovelas)", [b["nombre"] for b in cat_pv],
+                                 key="calc_pv")
+    with cc2:
+        nombre_ph = st.selectbox("Bloque P.H. (relleno)", [b["nombre"] for b in cat_ph],
+                                 key="calc_ph")
+    with cc3:
+        dovelas = st.number_input("Número de dovelas", min_value=0, value=3, step=1,
+                                  key="calc_dovelas")
+    ce1, ce2 = st.columns(2)
+    with ce1:
+        ent_pv = st.number_input(
+            "Simular entrega P.V. (bloques)",
+            min_value=0, value=0, step=1, key="calc_ent_pv",
+            help="Escribe cuántos bloques P.V. (dovelas) quieres simular para ver el semáforo.",
+        )
+    with ce2:
+        ent_ph = st.number_input(
+            "Simular entrega P.H. (bloques)",
+            min_value=0, value=0, step=1, key="calc_ent_ph",
+            help="Escribe cuántos bloques P.H. (relleno) quieres simular para ver el semáforo.",
+        )
+    ent_pv_param = ent_pv if ent_pv > 0 else None
+    ent_ph_param = ent_ph if ent_ph > 0 else None
+    r = calculadora_combinado(
+        largo, alto, "Combinado", dovelas, _bloque_por_nombre(nombre_pv),
+        _bloque_por_nombre(nombre_ph), junta_cm=junta, factor=factor,
+        umbral_pct=umbral, entregado_pv=ent_pv_param, entregado_ph=ent_ph_param,
+    )
+    if not r:
+        st.info("Completa largo y alto del muro.")
+        return
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Teórico total (Teoría)", f"{r['total']:.0f} bloques",
+              help="Suma de P.V. + P.H. sin factor de ajuste.")
+    m2.metric("Hiladas del muro", f"{r['hiladas']}",
+              help="Número de filas de bloques que caben en el alto del muro con la junta elegida.")
+    m3.metric("Rendimiento P.V.", f"{r['bloques_m2']:.2f} und/m²",
+              help="Bloques por m² usando las dimensiones del bloque P.V. y la junta elegida.")
+
+    lim_v_pct = umbral
+    lim_r_pct = umbral * 1.5
+    # Columnas con tipo uniforme (texto) para evitar warnings de Arrow
+    hay_sim = ent_pv_param is not None or ent_ph_param is not None
+    filas_tabla = [
+        {"Concepto": "Teórico geométrico (Teoría)",
+         "P.V. — dovelas": f"{r['pv']['teorico']:.0f}",
+         "P.H. — relleno": f"{r['ph']['teorico']:.0f}"},
+        {"Concepto": f"Teórico ajustado (Real) × {factor:g}",
+         "P.V. — dovelas": f"{r['pv']['ajustado']:.0f}",
+         "P.H. — relleno": f"{r['ph']['ajustado']:.0f}"},
+        {"Concepto": f"🟢 Normal hasta (umbral {lim_v_pct:.1f} %)",
+         "P.V. — dovelas": f"{r['pv']['lim_verde']:.0f} bloques",
+         "P.H. — relleno": f"{r['ph']['lim_verde']:.0f} bloques"},
+        {"Concepto": f"🔴 Alerta máxima (umbral × 1.5 = {lim_r_pct:.1f} %)",
+         "P.V. — dovelas": f"{r['pv']['lim_rojo']:.0f} bloques",
+         "P.H. — relleno": f"{r['ph']['lim_rojo']:.0f} bloques"},
+    ]
+    if hay_sim:
+        filas_tabla += [
+            {"Concepto": "Bloques simulados",
+             "P.V. — dovelas": str(ent_pv) if ent_pv_param else "—",
+             "P.H. — relleno": str(ent_ph) if ent_ph_param else "—"},
+            {"Concepto": "% simulado de exceso sobre lo pedido",
+             "P.V. — dovelas": _fmt_pct(r["pv"]["desp_pct"]) if ent_pv_param else "—",
+             "P.H. — relleno": _fmt_pct(r["ph"]["desp_pct"]) if ent_ph_param else "—"},
+            {"Concepto": "Resultado simulación",
+             "P.V. — dovelas": _SEMAFORO_EMOJI.get(r["pv"]["semaforo"], "—") if ent_pv_param else "—",
+             "P.H. — relleno": _SEMAFORO_EMOJI.get(r["ph"]["semaforo"], "—") if ent_ph_param else "—"},
+        ]
+    st.dataframe(pd.DataFrame(filas_tabla), hide_index=True, width="stretch")
+    if not hay_sim:
+        st.caption("Escribe valores en **Simular entrega P.V.** y/o **P.H.** para ver el resultado de la simulación.")
+    else:
+        for lado, ent, key in [("P.V.", ent_pv, "pv"), ("P.H.", ent_ph, "ph")]:
+            if not (ent > 0):
+                continue
+            margen = r[key]["lim_verde"] - ent
+            if margen >= 0:
+                st.info(f"**{lado}** — te quedan **{margen:.0f} bloques** antes de entrar a NARANJA.")
+            else:
+                st.warning(f"**{lado}** — ya superaste el límite normal por **{abs(margen):.0f} bloques**.")
+
+
+def _badge_semaforo(estado: str, entregado, lim_verde, lim_rojo, simulacion: bool = False):
+    """Muestra el semáforo con color y explicación. simulacion=True cambia el lenguaje."""
+    if not estado:
+        return
+    if simulacion:
+        txt = (
+            f"Simulando **{entregado:.0f}** bloques entregados. "
+            f"Normal hasta **{lim_verde:.0f}** · alerta máxima desde **{lim_rojo:.0f}**."
+        )
+        if estado == "VERDE":
+            st.success(f"🟢 **VERDE — simulación normal.** {txt} La cantidad simulada está dentro del rango esperado.")
+        elif estado == "NARANJA":
+            st.warning(f"🟠 **NARANJA — revisar.** {txt} La cantidad simulada supera el límite normal, habría pérdidas o exceso.")
+        else:
+            st.error(f"🔴 **ROJO — alerta en simulación.** {txt} La cantidad simulada supera el límite máximo.")
+    else:
+        txt = (
+            f"Entregaste **{entregado:.0f}** bloques. "
+            f"Normal hasta **{lim_verde:.0f}** · alerta máxima desde **{lim_rojo:.0f}**."
+        )
+        if estado == "VERDE":
+            st.success(f"🟢 **VERDE — entrega normal.** {txt} Estás dentro del rango esperado.")
+        elif estado == "NARANJA":
+            st.warning(f"🟠 **NARANJA — revisar.** {txt} Se están entregando más bloques de lo previsto, revisa si hay pérdidas o errores de conteo.")
+        else:
+            st.error(f"🔴 **ROJO — acción inmediata.** {txt} El exceso supera el límite máximo, investiga la causa antes de seguir entregando.")
+
+
+def _calc_tab_resumen_apto(df: pd.DataFrame):
+    """RESUMEN POR TIPO: cuántos bloques teóricos por apto/piso (réplica del Excel)."""
+    if df is None or df.empty:
+        st.info("Aún no hay registros. Captura muros en **📋 Ingreso de datos**.")
+        return
+
+    # ── Parámetros globales (factor/umbral) ──────────────────────────────────
+    p1, p2 = st.columns(2)
+    with p1:
+        factor = st.number_input("Factor de ajuste", min_value=1.0, max_value=1.5,
+                                 value=max(round(_factor_ajuste(), 2), 1.05),
+                                 step=0.01, format="%.2f", key="resapto_factor")
+    with p2:
+        umbral = st.number_input("Desperdicio %", min_value=0.0,
+                                 value=round(_umbral_pct(), 1), step=0.5,
+                                 format="%.1f", key="resapto_umbral")
+    ocultar_cero = st.checkbox("Ocultar tipos sin uso", value=True, key="resapto_cero")
+
+    catalogo = _catalogo()
+
+    def _tabla_resumen(df_src, apto_param, label_obra):
+        res = resumen_pedido_por_tipo(df_src, catalogo, apto=apto_param,
+                                     factor=factor, umbral_pct=umbral)
+        por = res["por_tipo"].copy()
+        if ocultar_cero:
+            por = por[por["Total_obra"] > 0]
+        if por.empty:
+            st.info("No hay bloques teóricos registrados para ese filtro.")
+            return
+        col_obra = label_obra
+        display = por.rename(columns={
+            "Tipo_bloque": "Tipo de bloque",
+            "Total_obra": col_obra,
+            "Con_factor": "Con factor",
+            "A_pedir": "A pedir",
+        })
+        cols_show = ["Tipo de bloque", col_obra, "Con factor", "A pedir"]
+        if apto_param:
+            display = display.rename(columns={"Total_apto": "Total apto"})
+            cols_show = ["Tipo de bloque", "Total apto", col_obra, "Con factor", "A pedir"]
+        st.dataframe(
+            display[cols_show].style.format(
+                {c: "{:,.0f}" for c in cols_show if c != "Tipo de bloque"}
+            ),
+            hide_index=True, width="stretch",
+        )
+        t = res["totales"]
+        filas = []
+        for lbl, k in [("P.V.", "pv"), ("P.H.", "ph"), ("GENERAL", "general")]:
+            td = t[k]
+            if apto_param:
+                filas.append(
+                    f"| **{lbl}** | {td['Total_apto']:,.0f} | {td['Total_obra']:,.0f} "
+                    f"| {td['Con_factor']:,.0f} | **{td['A_pedir']:,.0f}** |"
+                )
+            else:
+                filas.append(
+                    f"| **{lbl}** | {td['Total_obra']:,.0f} "
+                    f"| {td['Con_factor']:,.0f} | **{td['A_pedir']:,.0f}** |"
+                )
+        header = (
+            f"| | Total apto | {col_obra} | Con factor | A pedir |\n|---|---|---|---|---|"
+            if apto_param else
+            f"| | {col_obra} | Con factor | A pedir |\n|---|---|---|---|"
+        )
+        st.markdown(header + "\n" + "\n".join(filas))
+
+    # ── SECCIÓN 1: Totales del proyecto completo ─────────────────────────────
+    st.subheader("📊 Totales del proyecto completo")
+    st.caption("Suma de todos los muros registrados, sin filtro de piso ni apto.")
+    _tabla_resumen(df, apto_param=None, label_obra="Total proyecto")
+
+    st.divider()
+
+    # ── SECCIÓN 2: Filtrado por piso / apto ──────────────────────────────────
+    st.subheader("🔍 Detalle filtrado")
+    pisos = ["Todos"] + [p for p in opciones_unicas(df, "Piso") if p]
+    aptos = [z for z in opciones_unicas(df, "Zona") if z]
+
+    f0, f1 = st.columns(2)
+    with f0:
+        piso_sel = st.selectbox("Piso", pisos, key="resapto_piso")
+    with f1:
+        apto_sel = st.selectbox("Apto / Zona", ["Todos"] + aptos, key="resapto_apto")
+
+    df_f = df.copy()
+    if piso_sel != "Todos":
+        df_f = df_f[df_f["Piso"] == piso_sel]
+    apto_param = apto_sel if apto_sel != "Todos" else None
+
+    if df_f.empty:
+        st.info("No hay registros para ese piso.")
+        return
+
+    label = f"Total piso {piso_sel}" if piso_sel != "Todos" else "Total selección"
+    _tabla_resumen(df_f, apto_param=apto_param, label_obra=label)
+
+
+def _calc_tab_rendimiento(catalogo: list):
+    """Rendimiento und/m² por bloque y espesor de junta (hoja Referencia)."""
+    st.caption("Bloques por m² (sin desperdicio) según el espesor de junta. "
+               "Sale de la misma fórmula de la calculadora.")
+    tabla = rendimiento_por_junta(catalogo)
+    if tabla.empty:
+        st.info("No hay bloques en el catálogo.")
+        return
+    cols_junta = [c for c in tabla.columns if c != "Bloque"]
+    st.dataframe(
+        tabla.style.format({c: "{:.1f}" for c in cols_junta}),
+        hide_index=True, width="stretch",
+    )
+
+
+def pagina_calculadora():
+    st.header("🧮 Calculadora de mampostería")
+    cat_pv = _bloques_clase("PV")
+    cat_ph = _bloques_clase("PH")
+    if not (cat_pv or cat_ph):
+        st.info("No hay catálogo de bloques cargado; configúralo en el panel admin.")
+        return
+    tab1, tab2 = st.tabs(["🧱 Calculadora de muro", "📐 Rendimiento"])
+    with tab1:
+        _calc_tab_muro(cat_pv, cat_ph)
+    with tab2:
+        _calc_tab_rendimiento(_catalogo())
+
+
+def pagina_resumen_pedido(df: pd.DataFrame):
+    st.header("📦 Resumen ladrillos por apto")
+    _calc_tab_resumen_apto(df)
+
+
 def main():
     requerir_login()
 
@@ -2344,7 +3049,8 @@ def main():
         pagina = st.radio(
             "Navegación",
             ["📋 Ingreso de datos", "📈 Control", "📅 Cierres",
-             "🧱 Materiales", "🎯 Last Planner", "📊 Registros"],
+             "🧱 Materiales", "🧮 Calculadora", "📦 Resumen ladrillos",
+             "🎯 Last Planner", "📊 Registros"],
             label_visibility="collapsed",
         )
         st.markdown("---")
@@ -2382,6 +3088,10 @@ def main():
         pagina_cierres(df)
     elif pagina == "🧱 Materiales":
         pagina_materiales(df)
+    elif pagina == "🧮 Calculadora":
+        pagina_calculadora()
+    elif pagina == "📦 Resumen ladrillos":
+        pagina_resumen_pedido(df)
     else:
         pagina_last_planner(df)
 

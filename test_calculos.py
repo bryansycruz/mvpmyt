@@ -16,6 +16,8 @@ from calculos import (
     cumple_meta, TEORICO_SAC_M2,
     bloques_por_m2, hiladas_muro, bloques_teoricos_muro,
     desperdicio_pct, teorico_por_tipo, conciliacion, validar_catalogo,
+    calculadora_muro, calculadora_combinado, resumen_pedido_por_tipo,
+    rendimiento_por_junta, JUNTAS_CM,
 )
 from data_schema import normalizar
 
@@ -215,6 +217,111 @@ def test_normalizar_historico_sin_columnas_nuevas():
     assert "Bloques_PV_teo" in out.columns and "Tipo_bloque_PH" in out.columns
     assert pd.isna(out.iloc[0]["Bloques_PV_teo"])
     assert out.iloc[0]["Cumple_meta"] is True or out.iloc[0]["Cumple_meta"] == True  # noqa: E712
+
+
+# Bloques reales (medidas SIN pega) para los números del Excel.
+CAT_R12_PV = {"nombre": "P.V. rayado 12", "clase": "PV", "largo_m": 0.40,
+              "alto_m": 0.20, "espesor_m": 0.12, "junta_m": 0.015}
+CAT_R12_PH = {"nombre": "P.H. rayado 12", "clase": "PH", "largo_m": 0.40,
+              "alto_m": 0.20, "espesor_m": 0.12, "junta_m": 0.015}
+
+
+def test_calculadora_muro_numeros_del_excel():
+    # Hoja "Calculadora de muro": 4.5×2.4, P.V. rayado 12, junta 1.5, factor 1.05,
+    # umbral 7, entregado 130. Módulo 0.089225, teórico ≈ 121, ajustado ≈ 127.1.
+    r = calculadora_muro(4.5, 2.4, CAT_R12_PV, junta_cm=1.5, factor=1.05,
+                         umbral_pct=7, entregado=130)
+    assert math.isclose(r["modulo"], 0.089225, rel_tol=1e-6)
+    assert math.isclose(r["bloques_m2"], 11.2076, rel_tol=1e-4)
+    assert math.isclose(r["area"], 10.8)
+    assert math.isclose(r["teorico_geom"], 121.04, rel_tol=1e-3)
+    assert math.isclose(r["teorico_ajustado"], 127.09, rel_tol=1e-3)
+    assert math.isclose(r["lim_verde"], 135.99, rel_tol=1e-3)
+    assert math.isclose(r["lim_rojo"], 140.43, rel_tol=1e-3)
+    assert math.isclose(r["desp_pct_ajustado"], (130 - 127.09) / 127.09, rel_tol=1e-2)
+    assert math.isclose(r["desp_pct_geom"], (130 - 121.04) / 121.04, rel_tol=1e-2)
+    assert r["semaforo"] == "VERDE"   # 130 <= 136
+
+
+def test_calculadora_muro_semaforo_rojo_y_sin_entregado():
+    rojo = calculadora_muro(4.5, 2.4, CAT_R12_PV, junta_cm=1.5, factor=1.05,
+                            umbral_pct=7, entregado=200)
+    assert rojo["semaforo"] == "ROJO"
+    # sin entregado: geometría sí, desperdicio/semáforo vacíos
+    sin = calculadora_muro(4.5, 2.4, CAT_R12_PV, junta_cm=1.5)
+    assert math.isnan(sin["desp_pct_ajustado"]) and sin["semaforo"] == ""
+
+
+def test_calculadora_combinado_split_pv_ph():
+    # Hoja "Muro combinado": 4×2.4, combinado, 3 dovelas, rayado 12 P.V./P.H.,
+    # junta 1.5. hiladas 11 → P.V. = min(3×11, total) = 33; P.H. = resto.
+    r = calculadora_combinado(4.0, 2.4, "Combinado (P.V.+P.H.)", 3, CAT_R12_PV,
+                              CAT_R12_PH, junta_cm=1.5, factor=1.05, umbral_pct=7,
+                              entregado_pv=35, entregado_ph=78)
+    assert r["hiladas"] == 11
+    assert math.isclose(r["total"], 107.6, rel_tol=1e-2)
+    assert math.isclose(r["pv"]["teorico"], 33.0)
+    assert math.isclose(r["ph"]["teorico"], round(r["total"] - 33.0, 1))
+    assert r["pv"]["semaforo"] == "VERDE" and r["ph"]["semaforo"] == "VERDE"
+
+
+def test_calculadora_combinado_solo_vertical_y_horizontal():
+    v = calculadora_combinado(4.0, 2.4, "Vertical (solo P.V.)", 0, CAT_R12_PV,
+                              CAT_R12_PH, junta_cm=1.5)
+    assert v["ph"]["teorico"] == 0.0
+    assert math.isclose(v["pv"]["teorico"], v["total"], abs_tol=0.1)
+    h = calculadora_combinado(4.0, 2.4, "Horizontal (solo P.H.)", 3, CAT_R12_PV,
+                              CAT_R12_PH, junta_cm=1.5)
+    assert h["pv"]["teorico"] == 0.0
+    assert math.isclose(h["ph"]["teorico"], h["total"], abs_tol=0.1)
+
+
+def test_bloques_teoricos_solo_ph_sin_pv():
+    # Muro 100 % P.H. sin bloque P.V.: el teórico cae todo en P.H.
+    teo = bloques_teoricos_muro(3.0, 2.4, 0, None, BPH, uso="P.H.")
+    assert teo["pv"] == 0.0
+    assert math.isclose(teo["ph"], 90.0) and teo["hiladas"] == 12
+
+
+def test_resumen_pedido_por_tipo():
+    catalogo = [CAT_R12_PV, CAT_R12_PH]
+    df = pd.DataFrame({
+        "Sector": ["Torre"] * 3, "Piso": ["5", "5", "6"],
+        "Zona": ["APART 501", "APART 501", "APART 603"],
+        "Tipo_ladrillo": ["P.V. rayado 12"] * 3,
+        "Tipo_bloque_PH": ["P.H. rayado 12", None, None],
+        "Bloques_PV_teo": [33.0, 0.0, 50.0],
+        "Bloques_PH_teo": [44.5, None, None],
+    })
+    res = resumen_pedido_por_tipo(df, catalogo, apto="APART 501",
+                                  factor=1.05, umbral_pct=7)
+    por = res["por_tipo"].set_index("Tipo_bloque")
+    # P.V. rayado 12: apto 33, obra 83 (33+50), con factor 87.15, a pedir ceil(93.25)=94
+    assert math.isclose(por.loc["P.V. rayado 12", "Total_apto"], 33.0)
+    assert math.isclose(por.loc["P.V. rayado 12", "Total_obra"], 83.0)
+    assert math.isclose(por.loc["P.V. rayado 12", "Con_factor"], 87.2, rel_tol=1e-2)
+    assert por.loc["P.V. rayado 12", "A_pedir"] == 94
+    assert math.isclose(por.loc["P.H. rayado 12", "Total_obra"], 44.5)
+    # Totales por clase
+    assert math.isclose(res["totales"]["pv"]["Total_obra"], 83.0)
+    assert math.isclose(res["totales"]["ph"]["Total_obra"], 44.5)
+    assert math.isclose(res["totales"]["general"]["Total_obra"], 127.5)
+
+
+def test_resumen_pedido_sin_datos_no_revienta():
+    res = resumen_pedido_por_tipo(pd.DataFrame(), [CAT_R12_PV], apto=None,
+                                  factor=1.05, umbral_pct=7)
+    assert (res["por_tipo"]["Total_obra"] == 0).all()
+    assert res["totales"]["general"]["A_pedir"] == 0
+
+
+def test_rendimiento_por_junta_coincide_con_referencia():
+    tabla = rendimiento_por_junta([CAT_R12_PV]).set_index("Bloque")
+    # Hoja "Referencia" del Excel para el rayado: 11.6 / 11.2 / 11.0 / 10.8 / 10.5
+    assert list(tabla.columns) == [f"{j:g} cm" for j in JUNTAS_CM]
+    assert math.isclose(tabla.loc["P.V. rayado 12", "1 cm"], 11.6, abs_tol=0.05)
+    assert math.isclose(tabla.loc["P.V. rayado 12", "1.5 cm"], 11.2, abs_tol=0.05)
+    assert math.isclose(tabla.loc["P.V. rayado 12", "2.4 cm"], 10.5, abs_tol=0.05)
 
 
 def test_validar_catalogo_limpia_y_completa():
