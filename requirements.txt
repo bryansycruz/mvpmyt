@@ -1,3 +1,4 @@
+# Forzar rebuild limpio en Streamlit Cloud (checkout v2 — feature uso/bloque por muro)
 streamlit>=1.43.0
 pandas>=2.0.0
 openpyxl>=3.1.0
