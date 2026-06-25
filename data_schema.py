@@ -163,3 +163,34 @@ def normalizar_estibas(df: pd.DataFrame) -> pd.DataFrame:
     df["Timestamp_registro"] = pd.to_datetime(df["Timestamp_registro"], errors="coerce")
     df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce")
     return df
+
+
+# ─────────────────────────────────────────────────────────────
+# Conteos físicos por piso (el "corte" quincenal de cada piso)
+# ─────────────────────────────────────────────────────────────
+# Una fila por (corte, piso, tipo de bloque): `Cantidad` es lo que QUEDÓ físico
+# en el piso ese día (sobrante contado). Con esto se cierra la cuenta del
+# desperdicio real: gastado = entró al piso − queda. Se guarda en su propia
+# tabla `almacen_conteos` (Supabase) / hoja `Conteos_piso` (Excel/SharePoint).
+COLUMNAS_CONTEOS = [
+    "Fecha", "Sector", "Piso", "Tipo_bloque", "Cantidad",
+    "Observaciones", "Timestamp_registro",
+]
+
+
+def df_vacio_conteos() -> pd.DataFrame:
+    """DataFrame vacío con todas las columnas del esquema de conteos físicos."""
+    return pd.DataFrame(columns=COLUMNAS_CONTEOS)
+
+
+def normalizar_conteos(df: pd.DataFrame) -> pd.DataFrame:
+    """Garantiza columnas y tipos del esquema de conteos físicos por piso."""
+    for col in COLUMNAS_CONTEOS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    df = df[COLUMNAS_CONTEOS].copy()
+
+    df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
+    df["Timestamp_registro"] = pd.to_datetime(df["Timestamp_registro"], errors="coerce")
+    df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce")
+    return df

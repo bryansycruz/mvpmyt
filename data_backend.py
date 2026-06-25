@@ -47,7 +47,8 @@ __all__ = [
     "leer_salidas", "agregar_salidas",
     "leer_entradas", "agregar_entradas",
     "leer_estibas", "agregar_estibas",
-    "eliminar_entradas", "eliminar_salidas", "eliminar_estibas",
+    "leer_conteos", "agregar_conteos",
+    "eliminar_entradas", "eliminar_salidas", "eliminar_estibas", "eliminar_conteos",
     "leer_catalogo", "guardar_catalogo",
     "leer_valores_ocultos", "guardar_valores_ocultos",
     "backend_actual", "estado", "modo_local",
@@ -251,6 +252,29 @@ def agregar_estibas(df_nuevas: pd.DataFrame) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+# Conteos físicos por piso (el "corte" de cada piso; ledger aparte)
+# ─────────────────────────────────────────────────────────────
+def leer_conteos() -> pd.DataFrame:
+    if backend_actual() == "supabase":
+        return sb.leer_conteos()
+    return sp.leer_conteos()   # cubre SharePoint y Excel local
+
+
+def agregar_conteos(df_nuevas: pd.DataFrame) -> None:
+    """Añade conteos físicos nuevos (mismo patrón que estibas)."""
+    if df_nuevas is None or df_nuevas.empty:
+        return
+
+    if backend_actual() == "supabase":
+        sb.insertar_conteos(df_nuevas)
+        return
+
+    actual = sp.leer_conteos()
+    nuevo = pd.concat([actual, df_nuevas], ignore_index=True)
+    sp.guardar_conteos(nuevo)
+
+
+# ─────────────────────────────────────────────────────────────
 # Borrado de movimientos de almacén (corregir errores; el stock se recalcula)
 # ─────────────────────────────────────────────────────────────
 def _eliminar_movimientos(filas_df: pd.DataFrame, sb_por_id, sp_leer, sp_guardar) -> int:
@@ -299,6 +323,12 @@ def eliminar_estibas(filas_df: pd.DataFrame) -> int:
     """Borra las devoluciones de estibas seleccionadas. Devuelve nº borradas."""
     return _eliminar_movimientos(filas_df, sb.eliminar_estibas_por_id,
                                  sp.leer_estibas, sp.guardar_estibas)
+
+
+def eliminar_conteos(filas_df: pd.DataFrame) -> int:
+    """Borra los conteos físicos seleccionados. Devuelve nº borradas."""
+    return _eliminar_movimientos(filas_df, sb.eliminar_conteos_por_id,
+                                 sp.leer_conteos, sp.guardar_conteos)
 
 
 # ─────────────────────────────────────────────────────────────

@@ -168,6 +168,43 @@ create table if not exists almacen_estibas_dev (
 
 create index if not exists idx_estibas_fecha on almacen_estibas_dev ("Fecha");
 
+
+-- ─────────────────────────────────────────────────────────────
+-- Conteos físicos por piso (el "corte" de cada piso)
+-- Una fila por (corte, piso, tipo): `Cantidad` = lo que QUEDÓ físico ese día
+-- (sobrante contado). Cierra la cuenta del desperdicio real:
+--   gastado en el piso = entró (salidas a ese piso) − queda (este conteo).
+-- `Cantidad` admite 0 (se usó todo). Borrado por `id` como las demás tablas.
+-- ─────────────────────────────────────────────────────────────
+create table if not exists almacen_conteos (
+    id                      bigint generated always as identity primary key,
+    "Fecha"                 date not null,
+    "Sector"                text,
+    "Piso"                  text,
+    "Tipo_bloque"           text not null,
+    "Cantidad"              double precision not null check ("Cantidad" >= 0),
+    "Observaciones"         text,
+    "Timestamp_registro"    timestamptz,
+    created_at              timestamptz default now()
+);
+
+create index if not exists idx_conteos_fecha on almacen_conteos ("Fecha");
+create index if not exists idx_conteos_piso  on almacen_conteos ("Piso");
+
+-- RLS + políticas permisivas para la tabla nueva de conteos (Opción B, clave
+-- `anon`, que es la de producción). Idempotente. Con `service_role` (Opción A)
+-- es inocuo (esa clave omite RLS).
+alter table almacen_conteos enable row level security;
+drop policy if exists "conteos_lectura_mvp"   on almacen_conteos;
+drop policy if exists "conteos_insercion_mvp" on almacen_conteos;
+drop policy if exists "conteos_borrado_mvp"   on almacen_conteos;
+create policy "conteos_lectura_mvp"   on almacen_conteos
+    for select to anon, authenticated using (true);
+create policy "conteos_insercion_mvp" on almacen_conteos
+    for insert to anon, authenticated with check (true);
+create policy "conteos_borrado_mvp"   on almacen_conteos
+    for delete to anon, authenticated using (true);
+
 -- Config nueva del módulo de desperdicio (si faltan, la app usa sus defectos):
 --   umbral_desperdicio_pct → semáforo de la conciliación (verde ≤ umbral)
 --   factor_ajuste_bloques  → multiplica el teórico en la conciliación para

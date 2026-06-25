@@ -49,17 +49,19 @@ from data_schema import (
     normalizar_salidas, df_vacio_salidas,
     normalizar_entradas, df_vacio_entradas,
     normalizar_estibas, df_vacio_estibas,
+    normalizar_conteos, df_vacio_conteos,
 )
 
 # Aliases internos para mantener el resto del módulo sin cambios.
 _normalizar = normalizar
 _df_vacio = df_vacio
 
-# Hojas del libro: registros de pega + salidas + entradas + estibas devueltas.
+# Hojas del libro: registros de pega + salidas + entradas + estibas + conteos.
 HOJA_REGISTROS = "Registros"
 HOJA_SALIDAS = "Salidas_almacen"
 HOJA_ENTRADAS = "Entradas_almacen"
 HOJA_ESTIBAS = "Estibas_dev"
+HOJA_CONTEOS = "Conteos_piso"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -181,8 +183,11 @@ def _sin_timezone(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _escribir_libro(registros: pd.DataFrame, salidas: pd.DataFrame,
-                    entradas: pd.DataFrame, estibas: pd.DataFrame) -> bytes:
-    """Serializa el libro COMPLETO (las cuatro hojas) a bytes de Excel."""
+                    entradas: pd.DataFrame, estibas: pd.DataFrame,
+                    conteos: pd.DataFrame | None = None) -> bytes:
+    """Serializa el libro COMPLETO (todas las hojas) a bytes de Excel."""
+    if conteos is None:
+        conteos = df_vacio_conteos()
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         _sin_timezone(_normalizar(registros)).to_excel(
@@ -193,14 +198,22 @@ def _escribir_libro(registros: pd.DataFrame, salidas: pd.DataFrame,
             writer, index=False, sheet_name=HOJA_ENTRADAS)
         _sin_timezone(normalizar_estibas(estibas)).to_excel(
             writer, index=False, sheet_name=HOJA_ESTIBAS)
+        _sin_timezone(normalizar_conteos(conteos)).to_excel(
+            writer, index=False, sheet_name=HOJA_CONTEOS)
     buffer.seek(0)
     return buffer.read()
 
 
 def _guardar_libro(registros: pd.DataFrame, salidas: pd.DataFrame,
-                   entradas: pd.DataFrame, estibas: pd.DataFrame) -> None:
-    """Reescribe el archivo (local o SharePoint) con las CUATRO hojas."""
-    contenido = _escribir_libro(registros, salidas, entradas, estibas)
+                   entradas: pd.DataFrame, estibas: pd.DataFrame,
+                   conteos: pd.DataFrame | None = None) -> None:
+    """Reescribe el archivo (local o SharePoint) con TODAS las hojas.
+
+    `conteos=None` preserva los conteos existentes (los llamadores antiguos no
+    los pasan), igual que se preservan las demás hojas al guardar una sola."""
+    if conteos is None:
+        conteos = leer_conteos()
+    contenido = _escribir_libro(registros, salidas, entradas, estibas, conteos)
     if modo_local():
         with open(ARCHIVO_LOCAL, "wb") as f:
             f.write(contenido)
@@ -264,3 +277,16 @@ def guardar_entradas(df_entradas: pd.DataFrame) -> None:
 def guardar_estibas(df_estibas: pd.DataFrame) -> None:
     """Sube las estibas devueltas completas, preservando las demás hojas."""
     _guardar_libro(leer_datos(), leer_salidas(), leer_entradas(), df_estibas)
+
+
+def leer_conteos() -> pd.DataFrame:
+    """Lee la hoja `Conteos_piso` (conteos físicos por piso) normalizada."""
+    if modo_local():
+        return _leer_hoja_local(HOJA_CONTEOS, normalizar_conteos, df_vacio_conteos)
+    return _leer_hoja_sharepoint(HOJA_CONTEOS, normalizar_conteos, df_vacio_conteos)
+
+
+def guardar_conteos(df_conteos: pd.DataFrame) -> None:
+    """Sube los conteos físicos por piso completos, preservando las demás hojas."""
+    _guardar_libro(leer_datos(), leer_salidas(), leer_entradas(), leer_estibas(),
+                   df_conteos)

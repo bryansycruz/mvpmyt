@@ -31,6 +31,7 @@ from data_schema import (
     COLUMNAS_SALIDAS, df_vacio_salidas, normalizar_salidas,
     COLUMNAS_ENTRADAS, df_vacio_entradas, normalizar_entradas,
     COLUMNAS_ESTIBAS, df_vacio_estibas, normalizar_estibas,
+    COLUMNAS_CONTEOS, df_vacio_conteos, normalizar_conteos,
 )
 
 TABLA_POR_DEFECTO = "registros_mamposteria"
@@ -38,6 +39,7 @@ TABLA_CONFIG_POR_DEFECTO = "config_app"     # tabla clave-valor de configuració
 TABLA_SALIDAS_POR_DEFECTO = "almacen_salidas"   # vales de salida de bloque
 TABLA_ENTRADAS_POR_DEFECTO = "almacen_entradas"  # remisiones de entrada de bloque
 TABLA_ESTIBAS_POR_DEFECTO = "almacen_estibas_dev"  # pallets devueltos al proveedor
+TABLA_CONTEOS_POR_DEFECTO = "almacen_conteos"  # conteos fisicos por piso (corte)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -98,6 +100,14 @@ def _nombre_tabla_estibas() -> str:
         return valor or TABLA_ESTIBAS_POR_DEFECTO
     except Exception:
         return TABLA_ESTIBAS_POR_DEFECTO
+
+
+def _nombre_tabla_conteos() -> str:
+    try:
+        valor = str(st.secrets["SUPABASE_TABLE_CONTEOS"]).strip()
+        return valor or TABLA_CONTEOS_POR_DEFECTO
+    except Exception:
+        return TABLA_CONTEOS_POR_DEFECTO
 
 
 @st.cache_resource(show_spinner=False)
@@ -315,6 +325,35 @@ def insertar_estibas(df_nuevas: pd.DataFrame) -> None:
 def eliminar_estibas_por_id(ids: list) -> int:
     """Borra DEFINITIVAMENTE las estibas devueltas con esos `id`. Devuelve nº borradas."""
     return _eliminar_por_id(_nombre_tabla_estibas(), ids)
+
+
+# ─────────────────────────────────────────────────────────────
+# Conteos físicos por piso (corte quincenal, tabla `almacen_conteos`)
+# ─────────────────────────────────────────────────────────────
+def leer_conteos() -> pd.DataFrame:
+    """Descarga todos los conteos físicos como DataFrame normalizado (con `id`)."""
+    cliente = _cliente()
+    cols = ",".join(['"id"'] + [f'"{c}"' for c in COLUMNAS_CONTEOS])
+    resp = cliente.table(_nombre_tabla_conteos()).select(cols).execute()
+    datos = resp.data or []
+    if not datos:
+        return df_vacio_conteos()
+    return _con_id(datos, normalizar_conteos)
+
+
+def insertar_conteos(df_nuevas: pd.DataFrame) -> None:
+    """Inserta SOLO los conteos nuevos (append)."""
+    if df_nuevas is None or df_nuevas.empty:
+        return
+    registros = _a_registros(df_nuevas, columnas=COLUMNAS_CONTEOS,
+                             normalizador=normalizar_conteos)
+    cliente = _cliente()
+    cliente.table(_nombre_tabla_conteos()).insert(registros).execute()
+
+
+def eliminar_conteos_por_id(ids: list) -> int:
+    """Borra DEFINITIVAMENTE los conteos con esos `id`. Devuelve nº borradas."""
+    return _eliminar_por_id(_nombre_tabla_conteos(), ids)
 
 
 # ─────────────────────────────────────────────────────────────
