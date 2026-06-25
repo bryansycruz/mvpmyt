@@ -11,8 +11,14 @@ Control ladrillo.xlsx
 
 # Documentación interna de obra (no se publica en el repo)
 README_DESPERDICIO.md
+README_CALCULADORA_EXCEL.md
 docs/context.txt
 docs/problem_Adm.txt
+
+# Cálculos y datos internos de obra (no se publican en el repo)
+Calculadora_desperdicio_bloques.xlsx
+Calculo_desperdicio_bloques_factor_y_umbral.docx
+aptos.xlsx
 
 # Configuración local de herramientas
 .claude/
