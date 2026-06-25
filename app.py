@@ -2978,14 +2978,23 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
     df_f = df.copy()
     if piso_sel != "Todos":
         df_f = df_f[df_f["Piso"] == piso_sel]
-    apto_param = apto_sel if apto_sel != "Todos" else None
+    if apto_sel != "Todos":
+        df_f = df_f[df_f["Zona"] == apto_sel]
 
     if df_f.empty:
-        st.info("No hay registros para ese piso.")
+        st.info("No hay registros para ese filtro.")
         return
 
-    label = f"Total piso {piso_sel}" if piso_sel != "Todos" else "Total selección"
-    _tabla_resumen(df_f, apto_param=apto_param, label_obra=label)
+    # El cálculo (incluido "A pedir") refleja EXACTAMENTE el filtro elegido:
+    # pasamos el df ya filtrado por piso+apto y apto_param=None para que
+    # Total/Con factor/A pedir salgan de la selección, no del proyecto.
+    partes = []
+    if piso_sel != "Todos":
+        partes.append(f"piso {piso_sel}")
+    if apto_sel != "Todos":
+        partes.append(apto_sel)
+    label = "Total " + (" · ".join(partes) if partes else "selección")
+    _tabla_resumen(df_f, apto_param=None, label_obra=label)
 
 
 def _calc_tab_rendimiento(catalogo: list):

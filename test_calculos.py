@@ -315,6 +315,33 @@ def test_resumen_pedido_sin_datos_no_revienta():
     assert res["totales"]["general"]["A_pedir"] == 0
 
 
+def test_resumen_pedido_filtrado_refleja_la_seleccion():
+    """La página 'Resumen ladrillos' filtra el df por piso+apto ANTES de llamar
+    (con apto=None), para que 'A pedir' salga de la selección, no del proyecto."""
+    catalogo = [CAT_R12_PV, CAT_R12_PH]
+    df = pd.DataFrame({
+        "Sector": ["Torre"] * 3, "Piso": ["5", "5", "6"],
+        "Zona": ["APART 501", "APART 502", "APART 501"],
+        "Tipo_ladrillo": ["P.V. rayado 12"] * 3,
+        "Tipo_bloque_PH": ["P.H. rayado 12", "P.H. rayado 12", "P.H. rayado 12"],
+        "Bloques_PV_teo": [30.0, 28.0, 50.0],
+        "Bloques_PH_teo": [46.0, 44.0, 60.0],
+    })
+    # Filtro piso=5 + apto=501 → solo la 1ª fila (PV 30, PH 46).
+    df_sel = df[(df["Piso"] == "5") & (df["Zona"] == "APART 501")]
+    res = resumen_pedido_por_tipo(df_sel, catalogo, apto=None,
+                                  factor=1.05, umbral_pct=7)
+    g = res["totales"]
+    # PV: 30 → con factor 31.5 → a pedir ceil(31.5*1.07)=ceil(33.7)=34
+    assert math.isclose(g["pv"]["Total_obra"], 30.0)
+    assert g["pv"]["A_pedir"] == 34
+    # PH: 46 → con factor 48.3 → a pedir ceil(48.3*1.07)=ceil(51.7)=52
+    assert math.isclose(g["ph"]["Total_obra"], 46.0)
+    assert g["ph"]["A_pedir"] == 52
+    # No se mezcla con el resto del proyecto (que sumaría 108 PV).
+    assert g["general"]["Total_obra"] == 76.0
+
+
 def test_rendimiento_por_junta_coincide_con_referencia():
     tabla = rendimiento_por_junta([CAT_R12_PV]).set_index("Bloque")
     # Hoja "Referencia" del Excel para el rayado: 11.6 / 11.2 / 11.0 / 10.8 / 10.5
