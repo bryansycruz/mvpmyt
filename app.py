@@ -2904,16 +2904,8 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
         st.info("Aún no hay registros. Captura muros en **📋 Ingreso de datos**.")
         return
 
-    # ── Parámetros globales (factor/umbral) ──────────────────────────────────
-    p1, p2 = st.columns(2)
-    with p1:
-        factor = st.number_input("Factor de ajuste", min_value=1.0, max_value=1.5,
-                                 value=max(round(_factor_ajuste(), 2), 1.05),
-                                 step=0.01, format="%.2f", key="resapto_factor")
-    with p2:
-        umbral = st.number_input("Desperdicio %", min_value=0.0,
-                                 value=round(_umbral_pct(), 1), step=0.5,
-                                 format="%.1f", key="resapto_umbral")
+    factor = _factor_ajuste()
+    umbral = _umbral_pct()
     ocultar_cero = st.checkbox("Ocultar tipos sin uso", value=True, key="resapto_cero")
 
     catalogo = _catalogo()
