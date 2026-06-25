@@ -34,7 +34,7 @@ from calculos import (
     TEORICO_SAC_M2, KG_POR_SACO,
     UMBRAL_DESPERDICIO_PCT, FACTOR_AJUSTE_BLOQUES, JUNTAS_CM,
     consumo_ratio, consumo_por, resumen_por,
-    construir_filas_grupo, cumple_meta,
+    construir_filas_grupo, cumple_meta, repartir_por_m2,
     bloques_teoricos_muro, conciliacion,
     calculadora_muro, calculadora_combinado, resumen_pedido_por_tipo,
     rendimiento_por_junta,
@@ -465,77 +465,61 @@ def pagina_ingreso(df: pd.DataFrame):
         ayudante = campo_con_nuevo("Ayudante (opcional)", ayudantes, f"ayudante_{n}",
                                    opcional=True)
 
-    # Fila 3 — Apto/Zona, uso del muro y junta de pega (como el Excel)
+    # Fila 3 — Apto/Zona y junta de pega. El USO y el BLOQUE van POR muro, en la
+    # tabla de abajo, para que un mismo registro pueda mezclar tipos (p.ej. un
+    # muro combinado 12 y otro vertical 15).
     cat_pv = _bloques_clase("PV")
     cat_ph = _bloques_clase("PH")
     hay_catalogo = bool(cat_pv or cat_ph)
-    c6, c7, c8 = st.columns([2, 1, 1])
+    c6, c7 = st.columns([3, 1])
     with c6:
         zona = st.text_input("Apto / Zona", placeholder="Ej: APART 501, ÚTIL 055",
                              key=f"in_zona_{n}",
                              help="Sirve para el control 'cuántos bloques por apto'.")
     with c7:
-        uso_muro = st.selectbox(
-            "Uso del muro *", USOS_MURO, key=f"in_uso_{n}",
-            help="Combinado: el bloque P.V. va en las dovelas y el P.H. rellena el "
-                 "resto. O fuerza todo P.V. (vertical) o todo P.H. (horizontal).",
-        )
-    with c8:
         junta_cm = st.selectbox(
             "Junta de pega (cm) *", JUNTAS_CM, index=JUNTAS_CM.index(1.5),
             key=f"in_junta_{n}",
             help="Espesor de la pega. En Serrania la real es 1.5 cm.",
         )
 
-    # Fila 4 — bloque(s) según el uso elegido (P.V. para dovelas, P.H. para relleno)
-    tipo_ladrillo, tipo_ph = "", ""
-    necesita_pv = uso_muro in (USO_COMBINADO, USO_VERTICAL)
-    necesita_ph = uso_muro in (USO_COMBINADO, USO_HORIZONTAL)
-    if hay_catalogo:
-        cb1, cb2 = st.columns(2)
-        with cb1:
-            if necesita_pv and cat_pv:
-                tipo_ladrillo = st.selectbox(
-                    "Bloque P.V. (dovelas) *", [b["nombre"] for b in cat_pv],
-                    key=f"sel_pv_{n}",
-                    help="Bloque de perforación vertical: el de las columnas de dovela.",
-                )
-        with cb2:
-            if necesita_ph and cat_ph:
-                tipo_ph = st.selectbox(
-                    "Bloque P.H. (relleno) *", [b["nombre"] for b in cat_ph],
-                    key=f"sel_ph_{n}",
-                    help="Bloque de perforación horizontal: el divisorio que rellena el muro.",
-                )
-    else:
-        # Sin catálogo (muy raro): texto libre como antes, sin bloques teóricos.
-        tipo_ladrillo = campo_con_nuevo("Tipo de ladrillo", ladrillos, f"ladrillo_{n}")
-
-    # Modo para `bloques_teoricos_muro` y bloques con la junta real de este muro.
-    modo_uso = _USO_A_MODO[uso_muro]
-    bloque_pv = _bloque_con_junta(_bloque_por_nombre(tipo_ladrillo), junta_cm) if tipo_ladrillo else None
-    bloque_ph = _bloque_con_junta(_bloque_por_nombre(tipo_ph), junta_cm) if tipo_ph else None
-
-    # Sección: muros del registro (uno o varios que comparten el total de sacos)
+    # Sección: muros del registro. Cada muro lleva su PROPIO uso y bloque(s); el
+    # # de sacos es UNO solo para el grupo y se reparte entre los muros en
+    # proporción a sus m² (ver `repartir_por_m2`).
     st.subheader("Muros y materiales")
     st.caption(
-        "Agrega **una fila por muro**. El **# de sacos es el TOTAL para todos los "
-        "muros** de la tabla (no por muro): el consumo se calcula como "
-        "sacos ÷ m² del conjunto, tal como la celda combinada en Excel. "
-        "Las **# Dovelas** solo cuentan en muros **combinados** (reparten P.V./P.H.)."
+        "Agrega **una fila por muro** con su **uso** y su(s) **bloque(s)**. El "
+        "**# de sacos es el TOTAL del grupo**: la app lo reparte entre los muros "
+        "según sus m² y calcula, por muro, los **bloques** y el **mortero**. Las "
+        "**# Dovelas** reparten P.V./P.H. en los muros **combinados**."
     )
 
-    muros_init = pd.DataFrame([{"Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0}])
+    nombres_pv = [b["nombre"] for b in cat_pv]
+    nombres_ph = [b["nombre"] for b in cat_ph]
+    muros_init = pd.DataFrame([{
+        "Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0,
+        "Uso": USO_COMBINADO, "Bloque_PV": "", "Bloque_PH": "",
+    }])
+    col_cfg = {
+        "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
+        "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
+        "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
+        "Uso": st.column_config.SelectboxColumn("Uso del muro", options=USOS_MURO, required=True, width="medium"),
+    }
+    if hay_catalogo:
+        col_cfg["Bloque_PV"] = st.column_config.SelectboxColumn(
+            "Bloque P.V. (dovelas)", options=[""] + nombres_pv, width="medium")
+        col_cfg["Bloque_PH"] = st.column_config.SelectboxColumn(
+            "Bloque P.H. (relleno)", options=[""] + nombres_ph, width="medium")
+    else:
+        muros_init = muros_init.drop(columns=["Bloque_PV", "Bloque_PH"])
+
     editado = st.data_editor(
         muros_init,
         num_rows="dynamic",
         key=f"muros_editor_{n}",
         width="stretch",
-        column_config={
-            "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
-            "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
-            "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
-        },
+        column_config=col_cfg,
     )
 
     s1, s2 = st.columns([1, 3])
@@ -547,62 +531,86 @@ def pagina_ingreso(df: pd.DataFrame):
     with s2:
         observaciones = st.text_input("Observaciones", key=f"in_obs_{n}")
 
-    # Muros válidos (Largo y Alto > 0). El uso es del registro (no por fila).
-    muros = [
-        {"Largo_m": float(r.Largo_m), "Alto_m": float(r.Alto_m),
-         "Num_dovelas": int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0,
-         "Uso": modo_uso}
-        for r in editado.itertuples()
-        if pd.notna(r.Largo_m) and pd.notna(r.Alto_m) and r.Largo_m > 0 and r.Alto_m > 0
-    ]
+    # Parseo de la tabla → lista de muros, cada uno con su uso/bloque propios.
+    def _celda_txt(v) -> str:
+        return v.strip() if isinstance(v, str) else ""
 
-    # Cálculo automático en tiempo real (a nivel de grupo)
+    muros = []
+    for r in editado.itertuples():
+        if not (pd.notna(r.Largo_m) and pd.notna(r.Alto_m)
+                and r.Largo_m > 0 and r.Alto_m > 0):
+            continue
+        uso_disp = getattr(r, "Uso", None)
+        if not isinstance(uso_disp, str) or uso_disp not in USOS_MURO:
+            uso_disp = USO_COMBINADO
+        nec_pv = uso_disp in (USO_COMBINADO, USO_VERTICAL)
+        nec_ph = uso_disp in (USO_COMBINADO, USO_HORIZONTAL)
+        tipo_pv = _celda_txt(getattr(r, "Bloque_PV", "")) if (hay_catalogo and nec_pv) else ""
+        tipo_ph = _celda_txt(getattr(r, "Bloque_PH", "")) if (hay_catalogo and nec_ph) else ""
+        muros.append({
+            "Largo_m": float(r.Largo_m), "Alto_m": float(r.Alto_m),
+            "Num_dovelas": int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0,
+            "Uso": _USO_A_MODO.get(uso_disp, "Auto"), "uso_disp": uso_disp,
+            "necesita_pv": nec_pv, "necesita_ph": nec_ph,
+            "tipo_pv": tipo_pv, "tipo_ph": tipo_ph,
+            "bloque_pv": _bloque_con_junta(_bloque_por_nombre(tipo_pv), junta_cm) if tipo_pv else None,
+            "bloque_ph": _bloque_con_junta(_bloque_por_nombre(tipo_ph), junta_cm) if tipo_ph else None,
+        })
+
+    # Cálculo automático en tiempo real (grupo + desglose por muro).
     n_muros = len(muros)
-    m2_total = round(sum(m["Largo_m"] * m["Alto_m"] for m in muros), 2)
+    m2s = [m["Largo_m"] * m["Alto_m"] for m in muros]
+    m2_total = round(sum(m2s), 2)
     ml_total = round(sum(m["Num_dovelas"] * m["Alto_m"] for m in muros), 2)
     consumo_real = round(sacos_total / m2_total, 4) if m2_total > 0 else 0.0
     consumo_kg = round(sacos_total * _kg(), 2)
     consumo_kg_m2 = round(consumo_real * _kg(), 2)
     cumple = cumple_meta(consumo_real, m2_total, sacos_total, meta=_meta())
-
-    # Resumen geométrico de bloques (módulo, bloques/m², teórico) como el Excel.
+    sacos_muro = repartir_por_m2(float(sacos_total), m2s)
     factor = _factor_ajuste()
-    filas_bloques = ""
-    bloque_disp = bloque_pv or bloque_ph   # bloque "principal" para módulo/rendimiento
-    if bloque_disp and muros:
-        teos = [
-            bloques_teoricos_muro(m["Largo_m"], m["Alto_m"], m["Num_dovelas"],
-                                  bloque_pv, bloque_ph, uso=modo_uso)
-            for m in muros
-        ]
-        pv_total = sum(t["pv"] for t in teos)
-        ph_total = sum(t["ph"] for t in teos)
-        total_geom = pv_total + ph_total
-        junta_m = float(junta_cm) / 100.0
-        modulo = (bloque_disp["largo_m"] + junta_m) * (bloque_disp["alto_m"] + junta_m)
-        rendim = 1.0 / modulo if modulo > 0 else float("nan")
-        filas_bloques = (
-            f"| Módulo bloque+junta ({bloque_disp['nombre']}, junta {junta_cm:g} cm) "
-            f"| **{modulo:.6f} m²** |\n"
-            f"| Bloques por m² | **{rendim:.2f} und/m²** |\n"
-            f"| Teórico geométrico (bloques) | **{total_geom:,.0f}** |\n"
-            f"| Teórico ajustado (× factor {factor:g}) | **{total_geom * factor:,.0f}** |\n"
-            f"| Reparto teórico | **{pv_total:,.0f} P.V. + {ph_total:,.0f} P.H.** |\n"
+
+    # Desglose por muro: m², sacos repartidos y bloques teóricos (× factor).
+    filas_desglose = ""
+    tot_pv = tot_ph = 0.0
+    for i, m in enumerate(muros):
+        teo = (bloques_teoricos_muro(
+                   m["Largo_m"], m["Alto_m"], m["Num_dovelas"],
+                   m["bloque_pv"], m["bloque_ph"], uso=m["Uso"])
+               if (m["bloque_pv"] or m["bloque_ph"]) else {"pv": 0.0, "ph": 0.0})
+        pv_aj = teo["pv"] * factor
+        ph_aj = teo["ph"] * factor
+        tot_pv += pv_aj
+        tot_ph += ph_aj
+        tipo_txt = " + ".join(t for t in (m["tipo_pv"], m["tipo_ph"]) if t) or "—"
+        filas_desglose += (
+            f"| {i + 1} · {m['uso_disp'].split(' ')[0]} | {tipo_txt} | "
+            f"{m2s[i]:.2f} | {sacos_muro[i]:.1f} | {pv_aj:,.0f} | {ph_aj:,.0f} |\n"
+        )
+
+    desglose_md = ""
+    if muros:
+        desglose_md = (
+            f"\n**Desglose por muro** (sacos repartidos por m² · bloques × factor {factor:g}):\n\n"
+            "| Muro | Bloque(s) | m² | Sacos | Bloques P.V. | Bloques P.H. |\n"
+            "|---|---|---|---|---|---|\n"
+            f"{filas_desglose}"
+            f"| **Total** | | **{m2_total:.2f}** | **{sacos_total:.1f}** | "
+            f"**{tot_pv:,.0f}** | **{tot_ph:,.0f}** |\n"
         )
 
     estado_txt = "✓ SÍ" if cumple else "✗ NO"
     st.info(
-        f"""**⚡ Calculado automáticamente** — grupo de **{n_muros}** muro(s) · uso **{uso_muro}**
+        f"""**⚡ Calculado automáticamente** — grupo de **{n_muros}** muro(s)
 
 | Indicador | Valor |
 |---|---|
 | M² ejecutados (Σ Largo × Alto) | **{m2_total:.2f} m²** |
 | ML dovelas (Σ # Dovelas × Alto) | **{ml_total:.2f} ml** |
-{filas_bloques}| Consumo real ({sacos_total:.1f} sacos ÷ {m2_total:.2f} m²) | **{consumo_real:.3f} sac/m²** |
+| Consumo real ({sacos_total:.1f} sacos ÷ {m2_total:.2f} m²) | **{consumo_real:.3f} sac/m²** |
 | Mortero por m² ({consumo_real:.3f} sac/m² × {_kg():g} kg/saco) | **{consumo_kg_m2:.1f} kg/m²** |
 | Mortero TOTAL del grupo ({sacos_total:.1f} sacos × {_kg():g} kg/saco) | **{consumo_kg:.1f} kg** |
 | Cumple meta (≤ {_meta():g}) | **{estado_txt}** |
-"""
+{desglose_md}"""
     )
 
     # Guardar
@@ -616,10 +624,15 @@ def pagina_ingreso(df: pd.DataFrame):
             errores.append("El campo **Piso** es obligatorio.")
         if n_muros == 0:
             errores.append("Agrega al menos un muro con **Largo** y **Alto** mayores que 0.")
-        if hay_catalogo and necesita_pv and not tipo_ladrillo:
-            errores.append("Elige el **Bloque P.V.** (lo pide el uso del muro).")
-        if hay_catalogo and necesita_ph and not tipo_ph:
-            errores.append("Elige el **Bloque P.H.** (lo pide el uso del muro).")
+        if hay_catalogo:
+            faltan_pv = [str(i + 1) for i, m in enumerate(muros)
+                         if m["necesita_pv"] and not m["tipo_pv"]]
+            faltan_ph = [str(i + 1) for i, m in enumerate(muros)
+                         if m["necesita_ph"] and not m["tipo_ph"]]
+            if faltan_pv:
+                errores.append(f"Elige el **Bloque P.V.** en el/los muro(s): {', '.join(faltan_pv)}.")
+            if faltan_ph:
+                errores.append(f"Elige el **Bloque P.H.** en el/los muro(s): {', '.join(faltan_ph)}.")
 
         if errores:
             for e in errores:
@@ -627,10 +640,11 @@ def pagina_ingreso(df: pd.DataFrame):
             return
 
         # Guardia anti doble clic: un payload idéntico al recién guardado es un
-        # doble envío, no un registro nuevo.
+        # doble envío, no un registro nuevo. La firma usa el tipo POR muro.
+        firma_muros = [(m["Largo_m"], m["Alto_m"], m["Num_dovelas"],
+                        m["uso_disp"], m["tipo_pv"], m["tipo_ph"]) for m in muros]
         firma = repr((str(fecha), oficial, ayudante, sector, piso, zona,
-                      uso_muro, junta_cm, tipo_ladrillo, tipo_ph,
-                      observaciones, float(sacos_total), muros))
+                      junta_cm, observaciones, float(sacos_total), firma_muros))
         ult = st.session_state.get("ultimo_registro_firma")
         if ult and ult[0] == firma and datetime.now().timestamp() - ult[1] < 120:
             st.warning(
@@ -647,17 +661,16 @@ def pagina_ingreso(df: pd.DataFrame):
             "Sector": sector,
             "Piso": piso,
             "Zona": zona,
-            "Tipo_ladrillo": tipo_ladrillo,
-            "Tipo_bloque_PH": tipo_ph,
             "Observaciones": observaciones,
             "Timestamp_registro": datetime.now(),
         }
 
         try:
             with st.spinner("Guardando…"):
+                # Cada muro ya trae su uso/bloque/tipo propios → la función reparte
+                # los sacos por m² y arma los teóricos por muro.
                 nuevas = construir_filas_grupo(
                     base, muros, sacos_total, kg_por_saco=_kg(), meta=_meta(),
-                    bloque_pv=bloque_pv, bloque_ph=bloque_ph,
                 )
                 agregar_registros(nuevas)  # append (eficiente en Supabase)
             st.cache_data.clear()

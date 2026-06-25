@@ -483,6 +483,26 @@ def validar_catalogo(crudo) -> list[dict]:
 
 
 # ── Construcción de filas a guardar ─────────────────────────────────
+def repartir_por_m2(total: float, m2s: list) -> list:
+    """Reparte `total` (p.ej. sacos) entre muros en proporción a sus m².
+
+    El ÚLTIMO muro recibe el remanente para que la suma sea EXACTAMENTE `total`
+    (evita el centavo perdido por redondeo). Si la suma de m² es 0, todo 0.
+    """
+    suma = sum(m2s)
+    if suma <= 0 or not m2s:
+        return [0.0 for _ in m2s]
+    out, acum = [], 0.0
+    for i, a in enumerate(m2s):
+        if i < len(m2s) - 1:
+            v = round(total * a / suma, 2)
+            out.append(v)
+            acum += v
+        else:
+            out.append(round(total - acum, 2))
+    return out
+
+
 def construir_filas_grupo(base: dict, muros: list, sacos_total: float,
                           kg_por_saco: float = KG_POR_SACO,
                           meta: float = TEORICO_SAC_M2,
@@ -490,41 +510,55 @@ def construir_filas_grupo(base: dict, muros: list, sacos_total: float,
                           bloque_ph: dict | None = None) -> pd.DataFrame:
     """
     Convierte un grupo de muros (que comparten `sacos_total`) en filas del esquema.
-    - Una fila por muro (cada uno con su Largo/Alto/M²/dovelas).
-    - El total de sacos va SOLO en la primera fila del grupo (las demás en 0),
-      igual que la celda combinada en Excel: así Σ Num_sacos = total real.
-    - Consumo y Cumple_meta se calculan a nivel de grupo (Σsacos ÷ Σm²) y se
-      repiten en todas las filas del grupo.
-    - `Grupo_id` enlaza las filas. Un muro solo = grupo de uno.
-    - Con `bloque_pv` (dict del catálogo) se calculan y guardan los bloques
-      teóricos por muro (`Bloques_PV_teo`/`Bloques_PH_teo`, snapshot). Cada
-      muro puede traer la clave opcional `Uso` ("Auto"/"P.V."/"P.H.").
-      Sin catálogo, esas columnas quedan vacías (comportamiento histórico).
+    - Una fila por muro (cada uno con su Largo/Alto/M²/dovelas y, opcionalmente,
+      su propio uso y bloques P.V./P.H.).
+    - Los sacos del grupo se REPARTEN entre los muros en proporción a sus m²
+      (`repartir_por_m2`): así cada muro guarda su porción de sacos y de mortero,
+      y Σ Num_sacos = total real. El consumo (Σsacos ÷ Σm²) es del grupo y se
+      repite en todas las filas (todas dan el mismo sac/m², el promedio real).
+    - `Cumple_meta` también es del grupo. `Grupo_id` enlaza las filas; un muro
+      solo = grupo de uno.
+    - Bloques teóricos por muro (`Bloques_PV_teo`/`Bloques_PH_teo`, snapshot):
+      cada muro puede traer sus propios `bloque_pv`/`bloque_ph` (dicts del
+      catálogo), `tipo_pv`/`tipo_ph` (nombres) y `Uso` ("Auto"/"P.V."/"P.H.").
+      Si no, usa los del grupo (`bloque_pv`/`bloque_ph`) y los
+      `Tipo_ladrillo`/`Tipo_bloque_PH` de `base`. Sin bloque, esas columnas
+      quedan vacías (comportamiento histórico).
     """
     grupo_id = uuid.uuid4().hex[:8]
-    m2_total = sum(m["Largo_m"] * m["Alto_m"] for m in muros)
+    m2s = [m["Largo_m"] * m["Alto_m"] for m in muros]
+    m2_total = sum(m2s)
     consumo = round(sacos_total / m2_total, 4) if m2_total > 0 else 0.0
     cumple = cumple_meta(consumo, m2_total, sacos_total, meta=meta)
+    sacos_muro = repartir_por_m2(float(sacos_total), m2s)
 
     filas = []
     for i, m in enumerate(muros):
+        b_pv = m.get("bloque_pv", bloque_pv)
+        b_ph = m.get("bloque_ph", bloque_ph)
+        s_i = sacos_muro[i]
         fila = {
             **base,
             "Largo_m": m["Largo_m"],
             "Alto_m": m["Alto_m"],
-            "M2_ejecutados": round(m["Largo_m"] * m["Alto_m"], 2),
-            "Num_sacos": float(sacos_total) if i == 0 else 0.0,
+            "M2_ejecutados": round(m2s[i], 2),
+            "Num_sacos": s_i,
             "Consumo_real_sac_m2": consumo,
-            "Consumo_mortero_kg": round(sacos_total * kg_por_saco, 2) if i == 0 else 0.0,
+            "Consumo_mortero_kg": round(s_i * kg_por_saco, 2),
             "Num_dovelas": int(m.get("Num_dovelas", 0)),
             "ML_dovelas": round(m.get("Num_dovelas", 0) * m["Alto_m"], 2),
             "Cumple_meta": bool(cumple),
             "Grupo_id": grupo_id,
         }
-        if bloque_pv or bloque_ph:
+        # Tipo por muro (si el muro lo trae); si no, se queda el de `base`.
+        if "tipo_pv" in m:
+            fila["Tipo_ladrillo"] = m["tipo_pv"]
+        if "tipo_ph" in m:
+            fila["Tipo_bloque_PH"] = m["tipo_ph"]
+        if b_pv or b_ph:
             teo = bloques_teoricos_muro(
                 m["Largo_m"], m["Alto_m"], int(m.get("Num_dovelas", 0)),
-                bloque_pv, bloque_ph, uso=m.get("Uso", "Auto"),
+                b_pv, b_ph, uso=m.get("Uso", "Auto"),
             )
             fila["Bloques_PV_teo"] = teo["pv"]
             fila["Bloques_PH_teo"] = teo["ph"]
