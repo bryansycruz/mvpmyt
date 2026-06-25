@@ -437,7 +437,6 @@ def pagina_ingreso(df: pd.DataFrame):
     oficiales = opciones_visibles(df, "Oficial")
     ayudantes = opciones_visibles(df, "Ayudante")
     pisos = opciones_visibles(df, "Piso")
-    ladrillos = opciones_visibles(df, "Tipo_ladrillo")
     OTRO_SECTOR = "➕ Otro sector…"
     sectores = ["Torre", "Plataforma"] + [
         s for s in opciones_visibles(df, "Sector") if s not in ("Torre", "Plataforma")
@@ -2917,9 +2916,47 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
         st.info("Aún no hay registros. Captura muros en **📋 Ingreso de datos**.")
         return
 
-    factor = _factor_ajuste()
-    umbral = _umbral_pct()
-    ocultar_cero = st.checkbox("Ocultar tipos sin uso", value=True, key="resapto_cero")
+    # Factor y desperdicio editables SOLO en esta vista (simulación del pedido):
+    # arrancan en los del proyecto, pero el usuario puede probar otros valores y
+    # el cálculo de "Con factor"/"Factor + desperdicio" se actualiza al instante.
+    factor_cfg = _factor_ajuste()
+    umbral_cfg = _umbral_pct()
+    FACTORES = [1.0, 1.02, 1.05, 1.08, 1.10]
+    DESPERDICIOS = [2, 5, 7, 8, 9]
+
+    def _idx(opts, val):
+        try:
+            return opts.index(val)
+        except ValueError:   # el valor del proyecto no está en la lista → el más cercano
+            return min(range(len(opts)), key=lambda i: abs(opts[i] - val))
+
+    cf, cd, co = st.columns([1, 1, 1])
+    with cf:
+        factor = st.selectbox(
+            "Factor (cortes/trabas)", FACTORES,
+            index=_idx(FACTORES, round(float(factor_cfg), 2)),
+            format_func=lambda x: f"{x:g}", key="resapto_factor",
+            help="Multiplica el teórico para cubrir cortes, medios bloques y "
+                 "trabas. Arranca en el del proyecto; aquí podés simular otros.",
+        )
+    with cd:
+        umbral = st.selectbox(
+            "Desperdicio (%)", DESPERDICIOS,
+            index=_idx(DESPERDICIOS, int(round(float(umbral_cfg)))),
+            format_func=lambda x: f"{x:g} %", key="resapto_umbral",
+            help="Margen de desperdicio que se suma sobre 'Con factor' para el "
+                 "pedido final.",
+        )
+    with co:
+        ocultar_cero = st.checkbox("Ocultar tipos sin uso", value=True,
+                                   key="resapto_cero")
+
+    st.caption(
+        f"**Necesario** = bloques teóricos que llevan los muros · "
+        f"**Con factor** = Necesario × factor {factor:g} (cortes/trabas) · "
+        f"**Factor + desperdicio** = Con factor + margen de desperdicio "
+        f"({umbral:g} %), redondeado hacia arriba (lo que se le pide al proveedor)."
+    )
 
     catalogo = _catalogo()
 
@@ -2933,16 +2970,20 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
             st.info("No hay bloques teóricos registrados para ese filtro.")
             return
         col_obra = label_obra
+        # Títulos con el factor y el % en uso, para que se entienda de dónde sale
+        # cada número (p.ej. "Con factor (×1.1)" y "Factor + desperdicio (×1.1 +9%)").
+        lbl_factor = f"Con factor (×{factor:g})"
+        lbl_pedido = f"Factor + desperdicio (×{factor:g} +{umbral:g}%)"
         display = por.rename(columns={
             "Tipo_bloque": "Tipo de bloque",
             "Total_obra": col_obra,
-            "Con_factor": "Con factor",
-            "A_pedir": "A pedir",
+            "Con_factor": lbl_factor,
+            "A_pedir": lbl_pedido,
         })
-        cols_show = ["Tipo de bloque", col_obra, "Con factor", "A pedir"]
+        cols_show = ["Tipo de bloque", col_obra, lbl_factor, lbl_pedido]
         if apto_param:
-            display = display.rename(columns={"Total_apto": "Total apto"})
-            cols_show = ["Tipo de bloque", "Total apto", col_obra, "Con factor", "A pedir"]
+            display = display.rename(columns={"Total_apto": "Necesario apto"})
+            cols_show = ["Tipo de bloque", "Necesario apto", col_obra, lbl_factor, lbl_pedido]
         st.dataframe(
             display[cols_show].style.format(
                 {c: "{:,.0f}" for c in cols_show if c != "Tipo de bloque"}
@@ -2964,16 +3005,16 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
                     f"| {td['Con_factor']:,.0f} | **{td['A_pedir']:,.0f}** |"
                 )
         header = (
-            f"| | Total apto | {col_obra} | Con factor | A pedir |\n|---|---|---|---|---|"
+            f"| | Necesario apto | {col_obra} | {lbl_factor} | {lbl_pedido} |\n|---|---|---|---|---|"
             if apto_param else
-            f"| | {col_obra} | Con factor | A pedir |\n|---|---|---|---|"
+            f"| | {col_obra} | {lbl_factor} | {lbl_pedido} |\n|---|---|---|---|"
         )
         st.markdown(header + "\n" + "\n".join(filas))
 
     # ── SECCIÓN 1: Totales del proyecto completo ─────────────────────────────
     st.subheader("📊 Totales del proyecto completo")
     st.caption("Suma de todos los muros registrados, sin filtro de piso ni apto.")
-    _tabla_resumen(df, apto_param=None, label_obra="Total proyecto")
+    _tabla_resumen(df, apto_param=None, label_obra="Necesario")
 
     st.divider()
 
@@ -2998,16 +3039,10 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
         st.info("No hay registros para ese filtro.")
         return
 
-    # El cálculo (incluido "A pedir") refleja EXACTAMENTE el filtro elegido:
+    # El cálculo (incluido "Factor + desperdicio") refleja EXACTAMENTE el filtro elegido:
     # pasamos el df ya filtrado por piso+apto y apto_param=None para que
-    # Total/Con factor/A pedir salgan de la selección, no del proyecto.
-    partes = []
-    if piso_sel != "Todos":
-        partes.append(f"piso {piso_sel}")
-    if apto_sel != "Todos":
-        partes.append(apto_sel)
-    label = "Total " + (" · ".join(partes) if partes else "selección")
-    _tabla_resumen(df_f, apto_param=None, label_obra=label)
+    # Necesario/Con factor/Factor + desperdicio salgan de la selección, no del proyecto.
+    _tabla_resumen(df_f, apto_param=None, label_obra="Necesario")
 
 
 def _calc_tab_rendimiento(catalogo: list):
