@@ -17,7 +17,6 @@ y acceso por usuario.
 | 📈 **Gráficas** | M² y consumo por oficial, sacos gastados, evolución diaria y presencia de mamposteros. Con **filtros por mampostero** para comparar a quien quieras. |
 | 📅 **Cierres** | Cierre **diario** y **semanal**, **comparación entre semanas/meses**, y el **cumplimiento de metas** de la semana (m² por piso y por mampostero) con gráficos y descarga a Excel. |
 | 🧱 **Materiales** | Movimientos de almacén (entradas/salidas), inventario y **desperdicio de bloque**: compara lo que se pegó (teórico) contra lo entregado por almacén. |
-| 🎯 **Last Planner** | Plan semanal de trabajo *(en construcción)*. |
 | 📊 **Registros** | Histórico completo, con búsqueda y exportación. |
 
 Además: **inicio de sesión** por correo, **roles de administrador** (editar metas,

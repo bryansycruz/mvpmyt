@@ -84,6 +84,27 @@ def _factor_ajuste() -> float:
     """Factor que multiplica el teórico en la conciliación (cortes/trabas)."""
     return float(_cfg().get("factor_ajuste_bloques", FACTOR_AJUSTE_BLOQUES))
 
+
+# Regla de negocio: el sobreprecio combinado (modulación + desperdicio) no debe
+# pasar del 5 %. Se mide de forma aditiva: (factor − 1)·100 + desperdicio %.
+TOPE_SOBRECONSUMO_PCT = 5.0
+
+
+def _sobreconsumo_pct(factor: float, umbral_pct: float) -> float:
+    """Sobreconsumo combinado en % = modulación (factor−1) + desperdicio."""
+    return (float(factor) - 1.0) * 100.0 + float(umbral_pct)
+
+
+def _aviso_tope_5pct(factor: float, umbral_pct: float) -> None:
+    """Advierte (sin bloquear) si Factor de Modulación + desperdicio > 5 %."""
+    total = _sobreconsumo_pct(factor, umbral_pct)
+    if total > TOPE_SOBRECONSUMO_PCT + 1e-9:
+        st.warning(
+            f"⚠️ El sobreconsumo combinado es **{total:.1f} %** "
+            f"(modulación {(factor - 1) * 100:.1f} % + desperdicio {umbral_pct:.1f} %) "
+            f"y supera el tope recomendado de {TOPE_SOBRECONSUMO_PCT:g} %."
+        )
+
 st.set_page_config(page_title="Control de Mampostería", page_icon="🧱", layout="wide")
 
 
@@ -589,7 +610,7 @@ def pagina_ingreso(df: pd.DataFrame):
     desglose_md = ""
     if muros:
         desglose_md = (
-            f"\n**Desglose por muro** (sacos repartidos por m² · bloques × factor {factor:g}):\n\n"
+            f"\n**Desglose por muro** (sacos repartidos por m² · bloques × Factor de Modulación {factor:g}):\n\n"
             "| Muro | Bloque(s) | m² | Sacos | Bloques P.V. | Bloques P.H. |\n"
             "|---|---|---|---|---|---|\n"
             f"{filas_desglose}"
@@ -1892,7 +1913,7 @@ def _tab_conciliacion(df: pd.DataFrame, df_sal: pd.DataFrame):
 
     st.caption(
         f"**Desperdicio % = (entregado − teórico ajustado) ÷ teórico ajustado.** "
-        f"Teórico ajustado = teórico × **{_factor_ajuste():g}** (factor por cortes/trabas, "
+        f"Teórico ajustado = teórico × **{_factor_ajuste():g}** (Factor de Modulación por cortes/trabas, "
         f"configurable). Semáforo: 🟢 ≤ {_umbral_pct():g}% · 🟠 ≤ {1.5 * _umbral_pct():g}% · 🔴 mayor. "
         "Solo los registros guardados con catálogo aportan teórico (los viejos no)."
     )
@@ -2564,18 +2585,22 @@ def _editor_config() -> None:
             umbral = st.number_input(
                 "Umbral desperdicio bloques (%)", min_value=0.0, step=0.5, format="%.1f",
                 value=float(cfg.get("umbral_desperdicio_pct", UMBRAL_DESPERDICIO_PCT)),
-                help="Semáforo de la conciliación en 🧱 Materiales (verde si ≤ umbral).",
+                help="Semáforo de la conciliación en 🧱 Materiales (Test) (verde si ≤ umbral).",
             )
             factor = st.number_input(
-                "Factor de ajuste bloques teóricos", min_value=0.5, max_value=2.0,
+                "Factor de Modulación (bloques teóricos)", min_value=0.5, max_value=2.0,
                 step=0.01, format="%.2f",
                 value=float(cfg.get("factor_ajuste_bloques", FACTOR_AJUSTE_BLOQUES)),
                 help="Multiplica el teórico en la conciliación para cubrir medios "
-                     "bloques/trabas (ej. 1.03–1.05). 1.00 = sin ajuste.",
+                     "bloques/trabas (ej. 1.03–1.05). 1.00 = sin ajuste. La "
+                     "modulación más el desperdicio no deberían pasar del 5 %.",
             )
             guardar = st.form_submit_button(
                 "💾 Guardar configuración", type="primary", use_container_width=True
             )
+
+        # Aviso (no bloquea) si modulación + desperdicio supera el 5 % recomendado.
+        _aviso_tope_5pct(_factor_ajuste(), _umbral_pct())
 
         if guardar:
             if meta <= 0 or kg <= 0 or not proyecto.strip():
@@ -2682,16 +2707,6 @@ def _eliminar_registros(df: pd.DataFrame) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# Pantalla 6 — Last Planner (avance semanal vs meta por piso)
-# ─────────────────────────────────────────────────────────────
-def pagina_last_planner(df: pd.DataFrame):
-    """Last Planner — por ahora vacío (placeholder). Se irá construyendo después
-    (compromisos semanales, PPC, restricciones, etc.)."""
-    st.header("🎯 Last Planner")
-    st.info("🚧 En construcción. Pronto encontrarás aquí el plan semanal.")
-
-
-# ─────────────────────────────────────────────────────────────
 # Pantalla — Calculadora de mampostería (réplica del Excel)
 # ─────────────────────────────────────────────────────────────
 _SEMAFORO_EMOJI = {"VERDE": "🟢 VERDE", "NARANJA": "🟠 NARANJA", "ROJO": "🔴 ROJO"}
@@ -2724,15 +2739,19 @@ def _calc_tab_muro(cat_pv: list, cat_ph: list):
 
     c4, c5 = st.columns(2)
     with c4:
-        factor = st.number_input("Factor de ajuste", min_value=1.0, max_value=1.5,
+        factor = st.number_input("Factor de Modulación", min_value=1.0, max_value=1.5,
                                  value=max(round(_factor_ajuste(), 2), 1.05),
                                  step=0.01, format="%.2f", key="calc_factor",
-                                 help="Sube el teórico por cortes/medios bloques (1.00–1.10).")
+                                 help="Sube el teórico por cortes/medios bloques (1.00–1.10). "
+                                      "Modulación + desperdicio no deberían pasar del 5 %.")
     with c5:
         umbral = st.number_input("Umbral desperdicio (%)", min_value=0.0,
                                  value=round(_umbral_pct(), 1), step=0.5,
                                  format="%.1f", key="calc_umbral",
                                  help="Verde hasta el umbral; rojo por encima de umbral×1.5.")
+
+    # Aviso (no bloquea) si modulación + desperdicio supera el 5 % recomendado.
+    _aviso_tope_5pct(factor, umbral)
 
     if modo == "Un solo tipo":
         nombres = [b["nombre"] for b in (cat_pv + cat_ph)]
@@ -2759,7 +2778,7 @@ def _calc_tab_muro(cat_pv: list, cat_ph: list):
         m1.metric("Teórico geométrico (Teoría)", f"{r['teorico_geom']:.0f} bloques",
                   help="Cuántos bloques caben matemáticamente en el área del muro.")
         m2.metric("Teórico ajustado (Real)", f"{r['teorico_ajustado']:.0f} bloques",
-                  help=f"Lo que debes pedir: Teoría × factor {factor:g} (incluye cortes y mermas).")
+                  help=f"Lo que debes pedir: Teoría × Factor de Modulación {factor:g} (incluye cortes y mermas).")
         lim_verde_pct = umbral
         lim_rojo_pct = umbral * 1.5
         st.markdown(
@@ -2832,7 +2851,7 @@ def _calc_tab_muro(cat_pv: list, cat_ph: list):
         return
     m1, m2, m3 = st.columns(3)
     m1.metric("Teórico total (Teoría)", f"{r['total']:.0f} bloques",
-              help="Suma de P.V. + P.H. sin factor de ajuste.")
+              help="Suma de P.V. + P.H. sin Factor de Modulación.")
     m2.metric("Hiladas del muro", f"{r['hiladas']}",
               help="Número de filas de bloques que caben en el alto del muro con la junta elegida.")
     m3.metric("Rendimiento P.V.", f"{r['bloques_m2']:.2f} und/m²",
@@ -2933,19 +2952,20 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
     cf, cd, co = st.columns([1, 1, 1])
     with cf:
         factor = st.selectbox(
-            "Factor (cortes/trabas)", FACTORES,
+            "Factor de Modulación (cortes/trabas)", FACTORES,
             index=_idx(FACTORES, round(float(factor_cfg), 2)),
             format_func=lambda x: f"{x:g}", key="resapto_factor",
             help="Multiplica el teórico para cubrir cortes, medios bloques y "
-                 "trabas. Arranca en el del proyecto; aquí podés simular otros.",
+                 "trabas. Arranca en el del proyecto; aquí podés simular otros. "
+                 "Modulación + desperdicio no deberían pasar del 5 %.",
         )
     with cd:
         umbral = st.selectbox(
             "Desperdicio (%)", DESPERDICIOS,
             index=_idx(DESPERDICIOS, int(round(float(umbral_cfg)))),
             format_func=lambda x: f"{x:g} %", key="resapto_umbral",
-            help="Margen de desperdicio que se suma sobre 'Con factor' para el "
-                 "pedido final.",
+            help="Margen de desperdicio que se suma sobre 'Con Factor de Modulación' "
+                 "para el pedido final.",
         )
     with co:
         ocultar_cero = st.checkbox("Ocultar tipos sin uso", value=True,
@@ -2953,10 +2973,14 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
 
     st.caption(
         f"**Necesario** = bloques teóricos que llevan los muros · "
-        f"**Con factor** = Necesario × factor {factor:g} (cortes/trabas) · "
-        f"**Factor + desperdicio** = Con factor + margen de desperdicio "
-        f"({umbral:g} %), redondeado hacia arriba (lo que se le pide al proveedor)."
+        f"**Con Factor de Modulación** = Necesario × Factor de Modulación {factor:g} "
+        f"(cortes/trabas) · **Factor de Modulación + desperdicio** = Con Factor de "
+        f"Modulación + margen de desperdicio ({umbral:g} %), redondeado hacia arriba "
+        f"(lo que se le pide al proveedor)."
     )
+
+    # Aviso (no bloquea) si modulación + desperdicio supera el 5 % recomendado.
+    _aviso_tope_5pct(factor, umbral)
 
     catalogo = _catalogo()
 
@@ -2970,10 +2994,10 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
             st.info("No hay bloques teóricos registrados para ese filtro.")
             return
         col_obra = label_obra
-        # Títulos con el factor y el % en uso, para que se entienda de dónde sale
-        # cada número (p.ej. "Con factor (×1.1)" y "Factor + desperdicio (×1.1 +9%)").
-        lbl_factor = f"Con factor (×{factor:g})"
-        lbl_pedido = f"Factor + desperdicio (×{factor:g} +{umbral:g}%)"
+        # Títulos con el factor y el % en uso, para que se entienda de dónde sale cada
+        # número (p.ej. "Con Factor de Modulación (×1.1)" y "Factor de Modulación + desperdicio (×1.1 +9%)").
+        lbl_factor = f"Con Factor de Modulación (×{factor:g})"
+        lbl_pedido = f"Factor de Modulación + desperdicio (×{factor:g} +{umbral:g}%)"
         display = por.rename(columns={
             "Tipo_bloque": "Tipo de bloque",
             "Total_obra": col_obra,
@@ -3098,8 +3122,8 @@ def main():
         pagina = st.radio(
             "Navegación",
             ["📋 Ingreso de datos", "📈 Control", "📅 Cierres",
-             "🧱 Materiales", "🧮 Calculadora", "📦 Resumen ladrillos",
-             "🎯 Last Planner", "📊 Registros"],
+             "🧱 Materiales (Test)", "🧮 Calculadora", "📦 Resumen ladrillos",
+             "📊 Registros"],
             label_visibility="collapsed",
         )
         st.markdown("---")
@@ -3135,14 +3159,12 @@ def main():
         pagina_graficas(df)
     elif pagina == "📅 Cierres":
         pagina_cierres(df)
-    elif pagina == "🧱 Materiales":
+    elif pagina == "🧱 Materiales (Test)":
         pagina_materiales(df)
     elif pagina == "🧮 Calculadora":
         pagina_calculadora()
     elif pagina == "📦 Resumen ladrillos":
         pagina_resumen_pedido(df)
-    else:
-        pagina_last_planner(df)
 
 
 if __name__ == "__main__":
