@@ -447,10 +447,11 @@ def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
     mismo grupo/registro que los muros normales (un solo botón Guardar y un solo
     "# Sacos del grupo" repartido entre TODOS los muros).
 
-    Reparto por muro: SIEMPRE **50/50** entre Tipo 1 y Tipo 2 (aproximado, sin
-    medidas exactas). Las # Dovelas solo se registran para el ML de dovelas; NO
-    cambian el reparto de bloques. Usa el MISMO nonce `n` del formulario principal:
-    al guardar el grupo se limpia junto con la tabla normal.
+    Reparto por muro (automático, según las dovelas):
+      - # Dovelas > 0 → "Dovelas + Redes" va en las dovelas y "Relleno" en el resto.
+      - # Dovelas = 0 → 50/50 entre los dos (aproximado, sin medidas exactas).
+    Columnas internas Tipo_1 ("Dovelas + Redes") y Tipo_2 ("Relleno"). Usa el MISMO
+    nonce `n` del formulario principal: al guardar el grupo se limpia con la normal.
     """
     muros = []
     with st.expander("➕ Muros mixtos (dos tipologías)"):
@@ -459,11 +460,11 @@ def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
             return muros
         st.caption(
             "Para muros que mezclan **dos tipologías** — P.V. (V12 + V15) **o** "
-            "P.H. (PH 12 + PH 15). El total de bloques del muro se reparte "
-            "**50/50** entre **Tipo 1** y **Tipo 2** (aproximado). Las **# Dovelas** "
-            "solo se registran para el ML; **no cambian el 50/50**. Se guardan en el "
-            "**mismo registro** que los muros de arriba (comparten el **# de sacos "
-            "del grupo** y el botón **Guardar**)."
+            "P.H. (PH 12 + PH 15). Con **# Dovelas > 0**, el bloque de **Dovelas + "
+            "Redes** va en las dovelas y el de **Relleno** en el resto; con "
+            "**# Dovelas = 0** se reparte **50/50**. Se guardan en el **mismo "
+            "registro** que los muros de arriba (comparten el **# de sacos del "
+            "grupo** y el botón **Guardar**)."
         )
         mixtos_init = pd.DataFrame([{
             "Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0, "Tipo_1": "", "Tipo_2": "",
@@ -471,15 +472,13 @@ def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
         col_cfg = {
             "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
             "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
-            "Num_dovelas": st.column_config.NumberColumn(
-                "# Dovelas", min_value=0, step=1, format="%d",
-                help="Solo para el ML de dovelas; NO cambia el reparto (siempre 50/50)."),
+            "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
             "Tipo_1": st.column_config.SelectboxColumn(
-                "Tipo 1", options=[""] + nombres_relleno, width="medium",
-                help="P.V. o P.H. — el 50% del muro."),
+                "Dovelas + Redes", options=[""] + nombres_relleno, width="medium",
+                help="Bloque de las dovelas y redes (P.V. o P.H.). Con # Dovelas = 0 es el 50%."),
             "Tipo_2": st.column_config.SelectboxColumn(
-                "Tipo 2", options=[""] + nombres_relleno, width="medium",
-                help="P.V. o P.H. — el otro 50% del muro."),
+                "Relleno", options=[""] + nombres_relleno, width="medium",
+                help="Bloque del relleno (P.V. o P.H.) — el resto del muro (o el otro 50%)."),
         }
         editado = st.data_editor(mixtos_init, num_rows="dynamic",
                                  key=f"mixtos_editor_{n}", width="stretch",
@@ -493,7 +492,7 @@ def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
             ndov = int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0
             muros.append({
                 "Largo_m": float(r.Largo_m), "Alto_m": float(r.Alto_m),
-                "Num_dovelas": ndov, "Uso": "Mixto",   # SIEMPRE 50/50 (dovelas no cambian el reparto)
+                "Num_dovelas": ndov, "Uso": "Auto" if ndov > 0 else "Mixto",
                 "uso_disp": "Mixto", "necesita_pv": True, "necesita_ph": True,
                 "tipo_pv": t1, "tipo_ph": t2, "es_mixto": True,
                 "bloque_pv": _bloque_con_junta(_bloque_por_nombre(t1), junta_cm) if t1 else None,
@@ -667,8 +666,10 @@ def pagina_ingreso(df: pd.DataFrame):
     factor = _factor_ajuste()
 
     # Desglose por muro: m², sacos repartidos y bloques teóricos (× factor).
+    # `por_tipo` acumula los bloques por NOMBRE de tipo para el % final.
     filas_desglose = ""
     tot_pv = tot_ph = 0.0
+    por_tipo: dict[str, float] = {}
     for i, m in enumerate(muros):
         teo = (bloques_teoricos_muro(
                    m["Largo_m"], m["Alto_m"], m["Num_dovelas"],
@@ -678,6 +679,10 @@ def pagina_ingreso(df: pd.DataFrame):
         ph_aj = teo["ph"] * factor
         tot_pv += pv_aj
         tot_ph += ph_aj
+        if m["tipo_pv"]:
+            por_tipo[m["tipo_pv"]] = por_tipo.get(m["tipo_pv"], 0.0) + pv_aj
+        if m["tipo_ph"]:
+            por_tipo[m["tipo_ph"]] = por_tipo.get(m["tipo_ph"], 0.0) + ph_aj
         tipo_txt = " + ".join(t for t in (m["tipo_pv"], m["tipo_ph"]) if t) or "—"
         filas_desglose += (
             f"| {i + 1} · {m['uso_disp'].split(' ')[0]} | {tipo_txt} | "
@@ -694,6 +699,19 @@ def pagina_ingreso(df: pd.DataFrame):
             f"| **Total** | | **{m2_total:.2f}** | **{sacos_total:.1f}** | "
             f"**{tot_pv:,.0f}** | **{tot_ph:,.0f}** |\n"
         )
+        # Relación aproximada por tipo de bloque (% del total de bloques del grupo).
+        total_bloques = sum(por_tipo.values())
+        if total_bloques > 0:
+            filas_pct = "".join(
+                f"| {t} | {v:,.0f} | {v / total_bloques * 100:.0f}% |\n"
+                for t, v in sorted(por_tipo.items(), key=lambda kv: -kv[1]) if v > 0
+            )
+            desglose_md += (
+                "\n**Relación aproximada por tipo** (% del total de bloques):\n\n"
+                "| Tipo de bloque | Bloques | % |\n|---|---|---|\n"
+                f"{filas_pct}"
+                f"| **Total** | **{total_bloques:,.0f}** | **100%** |\n"
+            )
 
     estado_txt = "✓ SÍ" if cumple else "✗ NO"
     st.info(
@@ -733,7 +751,7 @@ def pagina_ingreso(df: pd.DataFrame):
             if faltan_ph:
                 errores.append(f"Elige el **Bloque P.H.** en el/los muro(s): {', '.join(faltan_ph)}.")
             if faltan_mix:
-                errores.append(f"En **➕ Muros mixtos**, elige **Tipo 1 y Tipo 2** en el/los muro(s): {', '.join(faltan_mix)}.")
+                errores.append(f"En **➕ Muros mixtos**, elige **Dovelas + Redes** y **Relleno** en el/los muro(s): {', '.join(faltan_mix)}.")
 
         if errores:
             for e in errores:
