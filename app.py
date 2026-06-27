@@ -260,6 +260,9 @@ def _bloque_con_junta(bloque: dict | None, junta_cm: float):
 
 # Opciones de "uso del muro" (como la hoja "Muro combinado" del Excel) y su
 # mapeo al parámetro `uso` de `bloques_teoricos_muro` (P.V./P.H./Auto).
+# Los muros que MEZCLAN dos tipologías (V12+V15 o PH12+PH15) se ingresan en la
+# sección aparte "➕ Muros mixtos" (modo "Mixto"); la tabla principal es para
+# muros normales (dovela P.V. + relleno P.H.).
 USO_COMBINADO = "Combinado (P.V.+P.H.)"
 USO_VERTICAL = "Vertical (solo P.V.)"
 USO_HORIZONTAL = "Horizontal (solo P.H.)"
@@ -437,6 +440,66 @@ def _panel_limpiar_listas(df: pd.DataFrame) -> None:
             st.caption(f"**Ocultos en {etiqueta.lower()}:** " + ", ".join(sorted(ocultos_col)))
 
 
+def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
+                        nombres_relleno: list) -> list:
+    """Tabla desplegable de muros que mezclan DOS tipologías: P.V. (V12 + V15) o
+    P.H. (PH 12 + PH 15). **Devuelve** la lista de muros parseados para SUMARLOS al
+    mismo grupo/registro que los muros normales (un solo botón Guardar y un solo
+    "# Sacos del grupo" repartido entre TODOS los muros).
+
+    Reparto por muro (automático, según las dovelas):
+      - # Dovelas > 0 → las dovelas son del Tipo 1 y el resto del Tipo 2 (combinado).
+      - # Dovelas = 0 → 50/50 entre Tipo 1 y Tipo 2 (aproximado, sin medidas exactas).
+    Usa el MISMO nonce `n` del formulario principal: al guardar el grupo se limpia
+    junto con la tabla normal.
+    """
+    muros = []
+    with st.expander("➕ Muros mixtos (dos tipologías)"):
+        if not hay_catalogo:
+            st.info("Necesitas el catálogo de bloques para registrar muros mixtos.")
+            return muros
+        st.caption(
+            "Para muros que mezclan **dos tipologías** — P.V. (V12 + V15) **o** "
+            "P.H. (PH 12 + PH 15). Con **# Dovelas > 0**, las dovelas son del "
+            "**Tipo 1** y el resto del **Tipo 2**; con **# Dovelas = 0** se reparte "
+            "**50/50**. Se guardan en el **mismo registro** que los muros de arriba "
+            "(comparten el **# de sacos del grupo** y el botón **Guardar**)."
+        )
+        mixtos_init = pd.DataFrame([{
+            "Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0, "Tipo_1": "", "Tipo_2": "",
+        }])
+        col_cfg = {
+            "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
+            "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
+            "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
+            "Tipo_1": st.column_config.SelectboxColumn(
+                "Tipo 1", options=[""] + nombres_relleno, width="medium",
+                help="P.V. o P.H. Si hay dovelas va en las dovelas; si no, es el 50%."),
+            "Tipo_2": st.column_config.SelectboxColumn(
+                "Tipo 2", options=[""] + nombres_relleno, width="medium",
+                help="P.V. o P.H. El resto del muro (o el otro 50%)."),
+        }
+        editado = st.data_editor(mixtos_init, num_rows="dynamic",
+                                 key=f"mixtos_editor_{n}", width="stretch",
+                                 column_config=col_cfg)
+        for r in editado.itertuples():
+            if not (pd.notna(r.Largo_m) and pd.notna(r.Alto_m)
+                    and r.Largo_m > 0 and r.Alto_m > 0):
+                continue
+            t1 = r.Tipo_1.strip() if isinstance(r.Tipo_1, str) else ""
+            t2 = r.Tipo_2.strip() if isinstance(r.Tipo_2, str) else ""
+            ndov = int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0
+            muros.append({
+                "Largo_m": float(r.Largo_m), "Alto_m": float(r.Alto_m),
+                "Num_dovelas": ndov, "Uso": "Auto" if ndov > 0 else "Mixto",
+                "uso_disp": "Mixto", "necesita_pv": True, "necesita_ph": True,
+                "tipo_pv": t1, "tipo_ph": t2, "es_mixto": True,
+                "bloque_pv": _bloque_con_junta(_bloque_por_nombre(t1), junta_cm) if t1 else None,
+                "bloque_ph": _bloque_con_junta(_bloque_por_nombre(t2), junta_cm) if t2 else None,
+            })
+    return muros
+
+
 # ─────────────────────────────────────────────────────────────
 # Pantalla 1 — Ingreso de datos
 # ─────────────────────────────────────────────────────────────
@@ -516,6 +579,8 @@ def pagina_ingreso(df: pd.DataFrame):
 
     nombres_pv = [b["nombre"] for b in cat_pv]
     nombres_ph = [b["nombre"] for b in cat_ph]
+    # Catálogo completo (P.V. + P.H.): solo lo usa la sección "➕ Muros mixtos".
+    nombres_relleno = nombres_pv + nombres_ph
     muros_init = pd.DataFrame([{
         "Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0,
         "Uso": USO_COMBINADO, "Bloque_PV": "", "Bloque_PH": "",
@@ -541,6 +606,10 @@ def pagina_ingreso(df: pd.DataFrame):
         width="stretch",
         column_config=col_cfg,
     )
+
+    # Muros que mezclan dos tipologías (V12+V15 o PH12+PH15): tabla desplegable
+    # aparte que se SUMA al MISMO grupo/registro (comparten # sacos y Guardar).
+    muros_mixtos = _tabla_muros_mixtos(n, junta_cm, hay_catalogo, nombres_relleno)
 
     s1, s2 = st.columns([1, 3])
     with s1:
@@ -576,6 +645,12 @@ def pagina_ingreso(df: pd.DataFrame):
             "bloque_pv": _bloque_con_junta(_bloque_por_nombre(tipo_pv), junta_cm) if tipo_pv else None,
             "bloque_ph": _bloque_con_junta(_bloque_por_nombre(tipo_ph), junta_cm) if tipo_ph else None,
         })
+
+    # Los muros mixtos se suman al MISMO grupo: el cálculo, el reparto de sacos y
+    # el guardado tratan a todos por igual. `muros_normales` se conserva aparte
+    # solo para validar el P.V./P.H. de la tabla normal con mensajes claros.
+    muros_normales = muros
+    muros = muros_normales + muros_mixtos
 
     # Cálculo automático en tiempo real (grupo + desglose por muro).
     n_muros = len(muros)
@@ -645,14 +720,18 @@ def pagina_ingreso(df: pd.DataFrame):
         if n_muros == 0:
             errores.append("Agrega al menos un muro con **Largo** y **Alto** mayores que 0.")
         if hay_catalogo:
-            faltan_pv = [str(i + 1) for i, m in enumerate(muros)
+            faltan_pv = [str(i + 1) for i, m in enumerate(muros_normales)
                          if m["necesita_pv"] and not m["tipo_pv"]]
-            faltan_ph = [str(i + 1) for i, m in enumerate(muros)
+            faltan_ph = [str(i + 1) for i, m in enumerate(muros_normales)
                          if m["necesita_ph"] and not m["tipo_ph"]]
+            faltan_mix = [str(i + 1) for i, m in enumerate(muros_mixtos)
+                          if not (m["tipo_pv"] and m["tipo_ph"])]
             if faltan_pv:
                 errores.append(f"Elige el **Bloque P.V.** en el/los muro(s): {', '.join(faltan_pv)}.")
             if faltan_ph:
                 errores.append(f"Elige el **Bloque P.H.** en el/los muro(s): {', '.join(faltan_ph)}.")
+            if faltan_mix:
+                errores.append(f"En **➕ Muros mixtos**, elige **Tipo 1 y Tipo 2** en el/los muro(s): {', '.join(faltan_mix)}.")
 
         if errores:
             for e in errores:
@@ -2490,7 +2569,7 @@ def _logout() -> None:
 def _pantalla_login() -> None:
     """Formulario de Iniciar sesión / Registrarse contra Supabase Auth."""
     st.markdown("## 🧱 Control de Mampostería")
-    st.caption("Inicia sesión para continuar. La cuenta es gratuita y la gestiona Supabase.")
+    st.caption("App de MYT para registrar los muros del día y controlar el gasto de mortero y bloques.")
 
     tab_entrar, tab_registro = st.tabs(["Iniciar sesión", "Registrarse"])
 

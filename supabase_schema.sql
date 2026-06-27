@@ -103,7 +103,9 @@ on conflict (clave) do nothing;
 -- ─────────────────────────────────────────────────────────────
 
 -- Columnas nuevas del histórico (los registros viejos quedan en null):
---   Tipo_bloque_PH  → bloque divisorio del grupo (Tipo_ladrillo guarda el P.V.)
+--   Tipo_bloque_PH  → bloque de RELLENO del muro (no tiene por qué ser P.H.: el
+--                     relleno puede hacerse con P.V. V12/V15). Tipo_ladrillo
+--                     guarda el estructural de las dovelas (P.V.).
 --   Bloques_*_teo   → bloques teóricos por muro (snapshot al guardar)
 alter table registros_mamposteria
     add column if not exists "Tipo_bloque_PH"  text,

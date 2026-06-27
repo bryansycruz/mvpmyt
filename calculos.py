@@ -140,6 +140,10 @@ def bloques_teoricos_muro(largo_m: float, alto_m: float, num_dovelas: int,
       - Con divisorio y 0 dovelas, o `uso="P.H."`              → 100 % P.H.
       - Con divisorio y dovelas > 0 (uso "Auto")               → mixto:
             P.V. = dovelas × hiladas (capado al total) y P.H. = resto.
+      - `uso="Mixto"` con AMBOS bloques → muro SIN dovelas que se completa con
+            dos tipologías de relleno repartidas 50/50 (mitad en `pv`, mitad en
+            `ph`; cada slot guarda un tipo distinto y la conciliación los suma
+            por nombre). Con un solo bloque, cae a 100 % de ese.
 
     Acepta muro 100 % P.H. sin bloque P.V. (`bloque_pv=None`, `bloque_ph` dado y
     `uso="P.H."`): usa el P.H. como base de hiladas/total y el teórico cae todo en
@@ -152,6 +156,17 @@ def bloques_teoricos_muro(largo_m: float, alto_m: float, num_dovelas: int,
     modo = str(uso or "Auto").upper().replace(".", "").strip()
     if largo_m <= 0 or alto_m <= 0 or (not bloque_pv and not bloque_ph):
         return {"hiladas": 0, "total": 0.0, "pv": 0.0, "ph": 0.0}
+
+    # Relleno mixto: muro sin dovelas completado con DOS tipologías al 50/50.
+    if modo == "MIXTO" and bloque_pv and bloque_ph:
+        total = round(largo_m * alto_m * bloques_por_m2(
+            bloque_pv["largo_m"], bloque_pv["alto_m"], bloque_pv.get("junta_m", 0.015)
+        ), 1)
+        hiladas = hiladas_muro(alto_m, bloque_pv["alto_m"], bloque_pv.get("junta_m", 0.015))
+        pv = round(total / 2.0, 1)
+        return {"hiladas": hiladas, "total": total, "pv": pv, "ph": round(total - pv, 1)}
+    if modo == "MIXTO":   # un solo bloque elegido → 100 % de ese tipo
+        modo = "PV" if bloque_pv else "PH"
 
     # Sin bloque P.V. el muro solo puede ser P.H. (relleno).
     if not bloque_pv:
@@ -187,9 +202,10 @@ def desperdicio_pct(entregado: float, teorico: float) -> float:
 def teorico_por_tipo(df: pd.DataFrame, dims=("Sector", "Piso")) -> pd.DataFrame:
     """Bloques teóricos acumulados en formato largo: [*dims, Tipo_bloque, Teorico].
 
-    Une los P.V. (Tipo_ladrillo + Bloques_PV_teo) con los P.H.
-    (Tipo_bloque_PH + Bloques_PH_teo). Las filas históricas sin teórico (NaN)
-    simplemente no aportan.
+    Une las dovelas (Tipo_ladrillo + Bloques_PV_teo) con el relleno
+    (Tipo_bloque_PH + Bloques_PH_teo). El relleno puede ser un bloque P.V.
+    (V12/V15) o P.H.: aquí solo importa el nombre del tipo, no su clase. Las
+    filas históricas sin teórico (NaN) simplemente no aportan.
     """
     dims = list(dims)
     cols_out = dims + ["Tipo_bloque", "Teorico"]
@@ -523,7 +539,8 @@ def construir_filas_grupo(base: dict, muros: list, sacos_total: float,
       catálogo), `tipo_pv`/`tipo_ph` (nombres) y `Uso` ("Auto"/"P.V."/"P.H.").
       Si no, usa los del grupo (`bloque_pv`/`bloque_ph`) y los
       `Tipo_ladrillo`/`Tipo_bloque_PH` de `base`. Sin bloque, esas columnas
-      quedan vacías (comportamiento histórico).
+      quedan vacías (comportamiento histórico). El relleno (`bloque_ph`) puede
+      ser un bloque P.V. (V12/V15) o P.H.; aquí solo importa el nombre del tipo.
     """
     grupo_id = uuid.uuid4().hex[:8]
     m2s = [m["Largo_m"] * m["Alto_m"] for m in muros]

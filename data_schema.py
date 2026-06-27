@@ -15,8 +15,9 @@ import pandas as pd
 # Estos nombres se usan tal cual como columnas del Excel (hoja `Registros`)
 # y como columnas de la tabla de Supabase.
 # Las columnas nuevas van AL FINAL para no alterar el orden del histórico:
-#   Tipo_bloque_PH  — bloque divisorio (perforación horizontal) del grupo;
-#                     `Tipo_ladrillo` conserva el estructural (P.V.).
+#   Tipo_bloque_PH  — bloque de RELLENO del muro (no tiene por qué ser P.H.: el
+#                     relleno puede hacerse con bloque P.V. como V12/V15);
+#                     `Tipo_ladrillo` conserva el estructural de las dovelas (P.V.).
 #   Bloques_PV_teo / Bloques_PH_teo — bloques teóricos por muro según geometría
 #                     (snapshot al guardar, igual que Cumple_meta).
 COLUMNAS = [

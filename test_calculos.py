@@ -144,6 +144,20 @@ def test_bloques_pv_capado_al_total():
     assert teo["ph"] >= 0.0
 
 
+def test_bloques_teoricos_relleno_mixto_50_50():
+    # muro SIN dovelas completado con dos tipologías → 90 total, 45 + 45
+    teo = bloques_teoricos_muro(3.0, 2.4, 0, BPV, BPH, uso="Mixto")
+    assert math.isclose(teo["total"], 90.0)
+    assert math.isclose(teo["pv"], 45.0)
+    assert math.isclose(teo["ph"], 45.0)
+
+
+def test_bloques_teoricos_mixto_un_solo_bloque_cae_a_100():
+    # mixto pero con un solo bloque elegido → 100 % de ese tipo (no se pierde)
+    teo = bloques_teoricos_muro(3.0, 2.4, 0, BPV, None, uso="Mixto")
+    assert math.isclose(teo["pv"], 90.0) and teo["ph"] == 0.0
+
+
 def test_desperdicio_pct():
     assert math.isclose(desperdicio_pct(110, 100), 0.10)
     assert math.isclose(desperdicio_pct(90, 100), -0.10)   # ahorro también se ve
@@ -205,6 +219,36 @@ def test_construir_filas_grupo_con_catalogo():
     assert math.isclose(out.iloc[0]["Bloques_PV_teo"], 24.0)
     assert math.isclose(out.iloc[0]["Bloques_PH_teo"], 66.0)
     assert out.iloc[0]["Tipo_bloque_PH"] == "P.H. rayado 12"
+
+
+def test_relleno_pv_se_acredita_por_nombre():
+    # El relleno puede ser un bloque P.V. (V12/V15): la conciliación agrupa por
+    # NOMBRE de tipo, sin importar la clase. Un muro con dovelas P.V.12 y relleno
+    # P.V.15 debe acreditar el relleno al tipo "P.V. rayado 15".
+    muros = [{
+        "Largo_m": 3.0, "Alto_m": 2.4, "Num_dovelas": 2, "Uso": "Auto",
+        "tipo_pv": "P.V. rayado 12", "tipo_ph": "P.V. rayado 15",
+        "bloque_pv": BPV, "bloque_ph": {**BPH, "nombre": "P.V. rayado 15", "clase": "PV"},
+    }]
+    fila = construir_filas_grupo(BASE, muros, sacos_total=5.0).iloc[0]
+    assert math.isclose(fila["Bloques_PV_teo"], 24.0)
+    assert math.isclose(fila["Bloques_PH_teo"], 66.0)
+    assert fila["Tipo_bloque_PH"] == "P.V. rayado 15"
+
+
+def test_construir_filas_grupo_relleno_mixto():
+    # Muro sin dovelas con V12 + V15 al 50/50: cada tipo se guarda en un slot y
+    # se cuenta por separado (sin columnas nuevas).
+    muros = [{
+        "Largo_m": 3.0, "Alto_m": 2.4, "Num_dovelas": 0, "Uso": "Mixto",
+        "tipo_pv": "V12", "tipo_ph": "V15",
+        "bloque_pv": {**BPV, "nombre": "V12"}, "bloque_ph": {**BPH, "nombre": "V15"},
+    }]
+    fila = construir_filas_grupo(BASE, muros, sacos_total=5.0).iloc[0]
+    assert math.isclose(fila["Bloques_PV_teo"], 45.0)
+    assert math.isclose(fila["Bloques_PH_teo"], 45.0)
+    assert fila["Tipo_ladrillo"] == "V12"
+    assert fila["Tipo_bloque_PH"] == "V15"
 
 
 def test_normalizar_historico_sin_columnas_nuevas():
