@@ -447,11 +447,10 @@ def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
     mismo grupo/registro que los muros normales (un solo botón Guardar y un solo
     "# Sacos del grupo" repartido entre TODOS los muros).
 
-    Reparto por muro (automático, según las dovelas):
-      - # Dovelas > 0 → las dovelas son del Tipo 1 y el resto del Tipo 2 (combinado).
-      - # Dovelas = 0 → 50/50 entre Tipo 1 y Tipo 2 (aproximado, sin medidas exactas).
-    Usa el MISMO nonce `n` del formulario principal: al guardar el grupo se limpia
-    junto con la tabla normal.
+    Reparto por muro: SIEMPRE **50/50** entre Tipo 1 y Tipo 2 (aproximado, sin
+    medidas exactas). Las # Dovelas solo se registran para el ML de dovelas; NO
+    cambian el reparto de bloques. Usa el MISMO nonce `n` del formulario principal:
+    al guardar el grupo se limpia junto con la tabla normal.
     """
     muros = []
     with st.expander("➕ Muros mixtos (dos tipologías)"):
@@ -460,10 +459,11 @@ def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
             return muros
         st.caption(
             "Para muros que mezclan **dos tipologías** — P.V. (V12 + V15) **o** "
-            "P.H. (PH 12 + PH 15). Con **# Dovelas > 0**, las dovelas son del "
-            "**Tipo 1** y el resto del **Tipo 2**; con **# Dovelas = 0** se reparte "
-            "**50/50**. Se guardan en el **mismo registro** que los muros de arriba "
-            "(comparten el **# de sacos del grupo** y el botón **Guardar**)."
+            "P.H. (PH 12 + PH 15). El total de bloques del muro se reparte "
+            "**50/50** entre **Tipo 1** y **Tipo 2** (aproximado). Las **# Dovelas** "
+            "solo se registran para el ML; **no cambian el 50/50**. Se guardan en el "
+            "**mismo registro** que los muros de arriba (comparten el **# de sacos "
+            "del grupo** y el botón **Guardar**)."
         )
         mixtos_init = pd.DataFrame([{
             "Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0, "Tipo_1": "", "Tipo_2": "",
@@ -471,13 +471,15 @@ def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
         col_cfg = {
             "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
             "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
-            "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
+            "Num_dovelas": st.column_config.NumberColumn(
+                "# Dovelas", min_value=0, step=1, format="%d",
+                help="Solo para el ML de dovelas; NO cambia el reparto (siempre 50/50)."),
             "Tipo_1": st.column_config.SelectboxColumn(
                 "Tipo 1", options=[""] + nombres_relleno, width="medium",
-                help="P.V. o P.H. Si hay dovelas va en las dovelas; si no, es el 50%."),
+                help="P.V. o P.H. — el 50% del muro."),
             "Tipo_2": st.column_config.SelectboxColumn(
                 "Tipo 2", options=[""] + nombres_relleno, width="medium",
-                help="P.V. o P.H. El resto del muro (o el otro 50%)."),
+                help="P.V. o P.H. — el otro 50% del muro."),
         }
         editado = st.data_editor(mixtos_init, num_rows="dynamic",
                                  key=f"mixtos_editor_{n}", width="stretch",
@@ -491,7 +493,7 @@ def _tabla_muros_mixtos(n: int, junta_cm: float, hay_catalogo: bool,
             ndov = int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0
             muros.append({
                 "Largo_m": float(r.Largo_m), "Alto_m": float(r.Alto_m),
-                "Num_dovelas": ndov, "Uso": "Auto" if ndov > 0 else "Mixto",
+                "Num_dovelas": ndov, "Uso": "Mixto",   # SIEMPRE 50/50 (dovelas no cambian el reparto)
                 "uso_disp": "Mixto", "necesita_pv": True, "necesita_ph": True,
                 "tipo_pv": t1, "tipo_ph": t2, "es_mixto": True,
                 "bloque_pv": _bloque_con_junta(_bloque_por_nombre(t1), junta_cm) if t1 else None,
