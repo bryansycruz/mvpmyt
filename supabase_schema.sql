@@ -77,7 +77,7 @@ create table if not exists config_app (
 insert into config_app (clave, valor) values
     ('meta_sac_m2', '0.84'),
     ('kg_por_saco', '42.5'),
-    ('proyecto',    'Serrania Campestre')
+    ('proyecto',    'Mi obra')
 on conflict (clave) do nothing;
 
 -- Igual que arriba: con la key `service_role` (Opción A) NO necesitas políticas.

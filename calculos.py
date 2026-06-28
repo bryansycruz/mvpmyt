@@ -28,14 +28,14 @@ UMBRAL_DESPERDICIO_PCT = 7.0
 FACTOR_AJUSTE_BLOQUES = 1.0
 
 # Espesores de junta de pega (cm) que ofrece la calculadora, igual que la hoja
-# "Referencia" del Excel. La pega real de Serrania es 1.5 cm.
+# "Referencia" del Excel. La pega real de la obra es 1.5 cm.
 JUNTAS_CM = [1.0, 1.5, 1.8, 2.0, 2.4]
 
-# Catálogo por defecto de bloques de Serrania (editable por admin en Supabase).
+# Catálogo por defecto de bloques de la obra (editable por admin en Supabase).
 # clase: "PV" = perforación vertical (estructural, donde van las dovelas)
 #        "PH" = perforación horizontal (divisorio).
 # Medidas del BLOQUE SIN pega, en metros. `junta_m` es la pega real promedio de
-# la obra (1.5 cm en Serrania; con 2.0 cm el admin la sube en el catálogo).
+# la obra (1.5 cm; con 2.0 cm el admin la sube en el catálogo).
 # bloque + junta = módulo: 0.415 × 0.215 → 11.2 und/m², hilada de 0.215 m.
 # `unds_por_estiba` permite digitar las salidas de almacén en estibas.
 # `meta_pedido` es el total pedido del proyecto/torre para ese tipo de bloque

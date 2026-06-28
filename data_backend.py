@@ -61,7 +61,7 @@ __all__ = [
 CONFIG_DEFECTOS = {
     "meta_sac_m2": TEORICO_SAC_M2,        # meta de consumo (sac/m²)
     "kg_por_saco": KG_POR_SACO,           # kilogramos por saco de mortero
-    "proyecto": "Serrania Campestre",     # nombre del proyecto/obra
+    "proyecto": "Mi obra",                # nombre del proyecto/obra (configurable)
     "umbral_desperdicio_pct": UMBRAL_DESPERDICIO_PCT,  # semáforo conciliación (%)
     "factor_ajuste_bloques": FACTOR_AJUSTE_BLOQUES,    # ajuste del teórico (cortes/trabas)
 }

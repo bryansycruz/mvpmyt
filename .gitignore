@@ -14,8 +14,8 @@ README_DESPERDICIO.md
 README_CALCULADORA_EXCEL.md
 docs/context.txt
 docs/problem_Adm.txt
-# Generador del Word de cálculos: embebe contexto interno y el nombre real de la
-# obra (Serrania Campestre) + análisis de sobrecostos → NO publicar.
+# Generador del Word de cálculos: embebe contexto interno de la obra
+# (nombre real + análisis de sobrecostos) → NO publicar.
 generar_doc_calculos.py
 
 # Cálculos y datos internos de obra (no se publican en el repo)

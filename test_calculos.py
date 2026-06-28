@@ -27,7 +27,7 @@ BASE = {
     "Observaciones": "", "Timestamp_registro": pd.Timestamp("2026-06-02 08:00"),
 }
 
-# Bloques de prueba (módulo 0.40×0.20 → 12.5 und/m², como los rayados de Serrania).
+# Bloques de prueba (módulo 0.40×0.20 → 12.5 und/m², como los rayados de la obra).
 BPV = {"nombre": "P.V. rayado 12", "clase": "PV", "largo_m": 0.39, "alto_m": 0.19,
        "espesor_m": 0.12, "junta_m": 0.01, "unds_por_estiba": 90}
 BPH = {"nombre": "P.H. rayado 12", "clase": "PH", "largo_m": 0.39, "alto_m": 0.19,

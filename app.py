@@ -1,5 +1,5 @@
 """
-app.py — Control de Mampostería · Serrania Campestre
+app.py — Control de Mampostería
 ────────────────────────────────────────────────────
 App Streamlit para registrar diariamente el trabajo de mampostería por oficial,
 calcular indicadores y persistir el histórico en la nube.
@@ -48,7 +48,7 @@ import auth_supabase as auth
 # Valor por defecto del nombre de proyecto. La meta y los kg/saco usan las
 # constantes de `calculos`. Todos pueden sobrescribirse desde la configuración
 # editable (ver _meta()/_kg()/_proyecto() y el panel de admin en el sidebar).
-PROYECTO = "Serrania Campestre"
+PROYECTO = "Mi obra"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -572,7 +572,7 @@ def pagina_ingreso(df: pd.DataFrame):
         junta_cm = st.selectbox(
             "Junta de pega (cm) *", JUNTAS_CM, index=JUNTAS_CM.index(1.5),
             key=f"in_junta_{n}",
-            help="Espesor de la pega. En Serrania la real es 1.5 cm.",
+            help="Espesor de la pega. En la obra la real es 1.5 cm.",
         )
 
     # Sección: muros del registro. Cada muro lleva su PROPIO uso y bloque(s); el
