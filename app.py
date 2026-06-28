@@ -1377,6 +1377,16 @@ def pagina_cierres(df: pd.DataFrame):
                 .rename(columns={"M2_ejecutados": "M2"}))
         piso["Falta"] = (meta_piso - piso["M2"]).clip(lower=0)
         piso["Estado"] = (piso["M2"] >= meta_piso).map({True: "Cumple", False: "No cumple"})
+
+        # La meta de m²/piso se puede cumplir en UN solo piso O como la SUMA de lo
+        # pegado en varios pisos: a veces el equipo reparte el trabajo en la semana
+        # (p. ej. 300 en un piso + 300 en otro + 200 en otro = la meta de un piso).
+        m2_combinado = float(piso["M2"].sum())
+        st.caption(
+            f"La meta de **{meta_piso:g} m²** se puede cumplir en un solo piso **o** "
+            "sumando lo pegado en varios pisos (cuando el equipo reparte el trabajo)."
+        )
+
         figp = px.bar(
             piso, x="M2", y="Piso", orientation="h", color="Estado", text_auto=".0f",
             color_discrete_map={"Cumple": "#1e8449", "No cumple": "#c0392b"},
@@ -1388,13 +1398,26 @@ def pagina_cierres(df: pd.DataFrame):
         figp.update_layout(xaxis_title="M² pegados", legend_title="")
         st.plotly_chart(figp, width="stretch")
 
-        pisos_no = piso[piso["Estado"] == "No cumple"].sort_values("Falta", ascending=False)
-        if pisos_no.empty:
-            st.success(f"✅ Todos los pisos cumplieron la meta de {meta_piso:g} m².")
+        # Estado COMBINADO: la suma de todos los pisos contra la meta de un piso.
+        if m2_combinado >= meta_piso:
+            st.success(
+                f"✅ Meta cumplida en conjunto: los pisos trabajados suman "
+                f"{m2_combinado:,.0f} m² (≥ {meta_piso:g} m²)."
+            )
         else:
-            det = ", ".join(f"Piso {r.Piso} (faltó {r.Falta:.0f} m²)"
-                            for r in pisos_no.itertuples())
-            st.warning(f"⚠️ {len(pisos_no)} piso(s) NO llegaron a {meta_piso:g} m²: {det}.")
+            st.warning(
+                f"⚠️ En conjunto van {m2_combinado:,.0f} m² de {meta_piso:g} m² "
+                f"(faltan {meta_piso - m2_combinado:,.0f} m²)."
+            )
+
+        # Detalle informativo: qué pisos, por sí solos, no llegaron a la meta.
+        pisos_no = piso[piso["Estado"] == "No cumple"].sort_values("Falta", ascending=False)
+        if not pisos_no.empty:
+            det = ", ".join(f"Piso {r.Piso} ({r.M2:.0f} m²)" for r in pisos_no.itertuples())
+            st.caption(
+                f"Por sí solos no llegaron a {meta_piso:g} m²: {det}. "
+                "No es un problema si la suma combinada ya cumple."
+            )
 
         st.markdown("**Por mampostero**")
         ofi = cierre.rename(columns={"M2_total": "M2"})[["Oficial", "M2", "Dias"]].copy()
@@ -1441,9 +1464,17 @@ def pagina_cierres(df: pd.DataFrame):
             st.caption("Los M² se atribuyen al **oficial**; el ayudante queda "
                        "registrado pero no suma m² aparte.")
 
+        resumen_comb = pd.DataFrame([{
+            "Meta_piso": meta_piso,
+            "Pisos_trabajados": len(piso),
+            "M2_combinado": m2_combinado,
+            "Falta": max(meta_piso - m2_combinado, 0.0),
+            "Estado": "Cumple" if m2_combinado >= meta_piso else "No cumple",
+        }])
         st.download_button(
             "⬇️ Descargar cierre semanal (Excel)",
             data=excel_libro({
+                "Resumen_combinado": resumen_comb,
                 "Mamposteros": cierre,
                 "Metas_pisos": piso[["Piso", "M2", "Falta", "Estado"]],
                 "Metas_mamposteros": ofi[["Oficial", "Dias", "M2", "m2_dia",
