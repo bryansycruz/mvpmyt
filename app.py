@@ -1110,6 +1110,43 @@ def pagina_graficas(df: pd.DataFrame):
     figs2.update_layout(xaxis_title="", yaxis_title="Sacos")
     st.plotly_chart(figs2, width="stretch")
 
+    # ── Tendencia en el tiempo: cuánto se consume por día/semana ──────────
+    st.markdown("**Tendencia en el tiempo** — cuánto se consume por período.")
+    df_t = df.dropna(subset=["Fecha"]).copy()
+    if df_t.empty:
+        st.info("Aún no hay registros con fecha para la tendencia de consumo.")
+    else:
+        periodo = st.radio("Período", ["Semana", "Día"], horizontal=True,
+                           key="graf_sacos_periodo")
+        if periodo == "Semana":
+            df_t["_periodo"] = df_t["Fecha"].dt.to_period("W").apply(lambda p: p.start_time)
+        else:
+            df_t["_periodo"] = df_t["Fecha"].dt.normalize()
+        agg = (df_t.groupby("_periodo", as_index=False)
+               .agg(Sacos=("Num_sacos", "sum"), M2=("M2_ejecutados", "sum"))
+               .sort_values("_periodo"))
+        agg["Consumo"] = agg["Sacos"] / agg["M2"].where(agg["M2"] > 0)
+        meta_t = _meta()
+        ct1, ct2 = st.columns(2)
+        with ct1:
+            figt1 = px.bar(
+                agg, x="_periodo", y="Sacos",
+                title=f"Sacos consumidos por {periodo.lower()}",
+                color_discrete_sequence=["#8e44ad"],
+            )
+            figt1.update_layout(xaxis_title="", yaxis_title="Sacos")
+            st.plotly_chart(figt1, width="stretch")
+        with ct2:
+            figt2 = px.line(
+                agg, x="_periodo", y="Consumo", markers=True,
+                title=f"Consumo (sac/m²) por {periodo.lower()} · meta {meta_t:g}",
+            )
+            figt2.add_hline(y=meta_t, line_dash="dash", line_color="red",
+                            annotation_text=f"Meta {meta_t:g}", annotation_position="top left")
+            figt2.update_traces(line_color="#16a085")
+            figt2.update_layout(xaxis_title="", yaxis_title="Consumo (sac/m²)")
+            st.plotly_chart(figt2, width="stretch")
+
     st.divider()
 
     # ═══════════ Capítulo: Presencia de mamposteros ═══════════
