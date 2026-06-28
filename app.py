@@ -87,8 +87,8 @@ def _factor_ajuste() -> float:
 
 
 # Regla de negocio: el sobreprecio combinado (modulación + desperdicio) no debe
-# pasar del 5 %. Se mide de forma aditiva: (factor − 1)·100 + desperdicio %.
-TOPE_SOBRECONSUMO_PCT = 5.0
+# pasar del 7 % en total. Se mide de forma aditiva: (factor − 1)·100 + desperdicio %.
+TOPE_SOBRECONSUMO_PCT = 7.0
 
 
 def _sobreconsumo_pct(factor: float, umbral_pct: float) -> float:
@@ -96,8 +96,8 @@ def _sobreconsumo_pct(factor: float, umbral_pct: float) -> float:
     return (float(factor) - 1.0) * 100.0 + float(umbral_pct)
 
 
-def _aviso_tope_5pct(factor: float, umbral_pct: float) -> None:
-    """Advierte (sin bloquear) si Factor de Modulación + desperdicio > 5 %."""
+def _aviso_tope(factor: float, umbral_pct: float) -> None:
+    """Advierte (sin bloquear) si Factor de Modulación + desperdicio supera el tope."""
     total = _sobreconsumo_pct(factor, umbral_pct)
     if total > TOPE_SOBRECONSUMO_PCT + 1e-9:
         st.warning(
@@ -2709,14 +2709,14 @@ def _editor_config() -> None:
                 value=float(cfg.get("factor_ajuste_bloques", FACTOR_AJUSTE_BLOQUES)),
                 help="Multiplica el teórico en la conciliación para cubrir medios "
                      "bloques/trabas (ej. 1.03–1.05). 1.00 = sin ajuste. La "
-                     "modulación más el desperdicio no deberían pasar del 5 %.",
+                     "modulación más el desperdicio no deberían pasar del 7 %.",
             )
             guardar = st.form_submit_button(
                 "💾 Guardar configuración", type="primary", use_container_width=True
             )
 
-        # Aviso (no bloquea) si modulación + desperdicio supera el 5 % recomendado.
-        _aviso_tope_5pct(_factor_ajuste(), _umbral_pct())
+        # Aviso (no bloquea) si modulación + desperdicio supera el 7 % recomendado.
+        _aviso_tope(_factor_ajuste(), _umbral_pct())
 
         if guardar:
             if meta <= 0 or kg <= 0 or not proyecto.strip():
@@ -2859,15 +2859,15 @@ def _calc_tab_muro(cat_pv: list, cat_ph: list):
                                  value=max(round(_factor_ajuste(), 2), 1.05),
                                  step=0.01, format="%.2f", key="calc_factor",
                                  help="Sube el teórico por cortes/medios bloques (1.00–1.10). "
-                                      "Modulación + desperdicio no deberían pasar del 5 %.")
+                                      "Modulación + desperdicio no deberían pasar del 7 %.")
     with c5:
         umbral = st.number_input("Umbral desperdicio (%)", min_value=0.0,
                                  value=round(_umbral_pct(), 1), step=0.5,
                                  format="%.1f", key="calc_umbral",
                                  help="Verde hasta el umbral; rojo por encima de umbral×1.5.")
 
-    # Aviso (no bloquea) si modulación + desperdicio supera el 5 % recomendado.
-    _aviso_tope_5pct(factor, umbral)
+    # Aviso (no bloquea) si modulación + desperdicio supera el 7 % recomendado.
+    _aviso_tope(factor, umbral)
 
     if modo == "Un solo tipo":
         nombres = [b["nombre"] for b in (cat_pv + cat_ph)]
@@ -3073,7 +3073,7 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
             format_func=lambda x: f"{x:g}", key="resapto_factor",
             help="Multiplica el teórico para cubrir cortes, medios bloques y "
                  "trabas. Arranca en el del proyecto; aquí podés simular otros. "
-                 "Modulación + desperdicio no deberían pasar del 5 %.",
+                 "Modulación + desperdicio no deberían pasar del 7 %.",
         )
     with cd:
         umbral = st.selectbox(
@@ -3095,8 +3095,8 @@ def _calc_tab_resumen_apto(df: pd.DataFrame):
         f"(lo que se le pide al proveedor)."
     )
 
-    # Aviso (no bloquea) si modulación + desperdicio supera el 5 % recomendado.
-    _aviso_tope_5pct(factor, umbral)
+    # Aviso (no bloquea) si modulación + desperdicio supera el 7 % recomendado.
+    _aviso_tope(factor, umbral)
 
     catalogo = _catalogo()
 
