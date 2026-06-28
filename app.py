@@ -198,6 +198,13 @@ def campo_con_nuevo(label: str, opciones: list, key: str, opcional: bool = False
     return seleccion
 
 
+def _mayus(texto) -> str:
+    """Normaliza texto digitado manualmente: sin espacios sobrantes y en MAYÚSCULAS.
+    Así lo que se guarda (oficial, apto, piso…) queda consistente (APART 603, no
+    'apart 603' ni 'Apart 603'), que es como ya lo escriben en obra."""
+    return str(texto or "").strip().upper()
+
+
 def color_consumo(val):
     """Rojo si supera la meta, verde si la cumple."""
     if pd.isna(val):
@@ -535,8 +542,8 @@ def pagina_ingreso(df: pd.DataFrame):
     with c2:
         sector_sel = st.selectbox("Sector *", sectores, key=f"in_sector_{n}")
         sector = (
-            st.text_input("Nuevo sector", key=f"in_sector_nuevo_{n}",
-                          placeholder="Ej: Sótano, Casino").strip()
+            _mayus(st.text_input("Nuevo sector", key=f"in_sector_nuevo_{n}",
+                                 placeholder="Ej: Sótano, Casino"))
             if sector_sel == OTRO_SECTOR else sector_sel
         )
     with c3:
@@ -621,6 +628,15 @@ def pagina_ingreso(df: pd.DataFrame):
         )
     with s2:
         observaciones = st.text_input("Observaciones", key=f"in_obs_{n}")
+
+    # Lo digitado a mano se guarda en MAYÚSCULAS (consistencia del histórico y de
+    # los agrupados por oficial/piso/apto). El Sector elegido de la lista no se
+    # toca; el "Nuevo sector" ya se normalizó arriba.
+    oficial = _mayus(oficial)
+    ayudante = _mayus(ayudante)
+    piso = _mayus(piso)
+    zona = _mayus(zona)
+    observaciones = _mayus(observaciones)
 
     # Parseo de la tabla → lista de muros, cada uno con su uso/bloque propios.
     def _celda_txt(v) -> str:
