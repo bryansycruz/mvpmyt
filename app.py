@@ -1152,7 +1152,9 @@ def pagina_graficas(df: pd.DataFrame):
     # ═══════════ Capítulo: Presencia de mamposteros ═══════════
     st.subheader("Presencia de mamposteros")
     st.caption(
-        "Cada barra va del **primer** al **último** día con registro de cada oficial. "
+        "Cuenta como presente quien aparece ese día como **oficial O como ayudante** "
+        "(así un mampostero registrado de ayudante también cuenta como que vino). "
+        "Cada barra va del **primer** al **último** día con registro. "
         "🟢 Activo · 🟡 En pausa (7+ días sin registrar) · ⚪ Inactivo (30+ días)."
     )
 
@@ -1162,31 +1164,50 @@ def pagina_graficas(df: pd.DataFrame):
         st.info("Aún no hay registros con fecha para la línea de presencia.")
     else:
         ref = df_f["Fecha"].max()
+        # Presencia REAL = la persona aparece como Oficial O como Ayudante ese día.
+        _of = df_f[["Oficial", "Fecha"]].rename(columns={"Oficial": "Persona"}).assign(Rol="oficial")
+        _ay = df_f[["Ayudante", "Fecha"]].rename(columns={"Ayudante": "Persona"}).assign(Rol="ayudante")
+        larga = pd.concat([_of, _ay], ignore_index=True)
+        larga["Persona"] = larga["Persona"].fillna("").astype(str).str.strip()
+        larga = larga[larga["Persona"] != ""]
+
+        def _dias_rol(rol: str) -> pd.Series:
+            sub = larga[larga["Rol"] == rol]
+            return sub.groupby("Persona")["Fecha"].apply(lambda s: s.dt.date.nunique())
+
+        dias_of_s, dias_ay_s = _dias_rol("oficial"), _dias_rol("ayudante")
+        # m² liderado como oficial (el ayudante no "lidera" m²): solo para el hover.
+        m2_of = (df_f.assign(_o=df_f["Oficial"].fillna("").astype(str).str.strip())
+                 .groupby("_o")["M2_ejecutados"].sum())
+
         pres = (
-            df_f.groupby("Oficial")
+            larga.groupby("Persona")
             .agg(
                 primer_dia=("Fecha", "min"),
                 ultimo_dia=("Fecha", "max"),
                 dias=("Fecha", lambda s: s.dt.date.nunique()),
-                m2_total=("M2_ejecutados", "sum"),
             )
             .reset_index()
         )
+        pres["dias_oficial"] = pres["Persona"].map(dias_of_s).fillna(0).astype(int)
+        pres["dias_ayudante"] = pres["Persona"].map(dias_ay_s).fillna(0).astype(int)
+        pres["m2_total"] = pres["Persona"].map(m2_of).fillna(0.0)
         pres["dias_sin_venir"] = (ref - pres["ultimo_dia"]).dt.days
         pres["Estado"] = pres["dias_sin_venir"].apply(estado_presencia)
         pres["fin"] = pres["ultimo_dia"] + pd.Timedelta(days=1)   # ancho visible si trabajó 1 día
 
-        orden = pres.sort_values("ultimo_dia")["Oficial"].tolist()
+        orden = pres.sort_values("ultimo_dia")["Persona"].tolist()
         fig4 = px.timeline(
-            pres, x_start="primer_dia", x_end="fin", y="Oficial", color="Estado",
+            pres, x_start="primer_dia", x_end="fin", y="Persona", color="Estado",
             color_discrete_map={"Activo": "#1e8449", "En pausa": "#f39c12", "Inactivo": "#95a5a6"},
-            hover_data={"dias": True, "m2_total": ":.0f", "dias_sin_venir": True,
+            hover_data={"dias": True, "dias_oficial": True, "dias_ayudante": True,
+                        "m2_total": ":.0f", "dias_sin_venir": True,
                         "primer_dia": False, "fin": False},
         )
-        # Marcas de los días con registro real dentro de cada barra.
-        dias_trab = df_f.drop_duplicates(["Oficial", "Fecha"])
+        # Marcas de los días con registro real (en cualquier rol) dentro de cada barra.
+        dias_trab = larga.drop_duplicates(["Persona", "Fecha"])
         fig4.add_trace(go.Scatter(
-            x=dias_trab["Fecha"], y=dias_trab["Oficial"], mode="markers",
+            x=dias_trab["Fecha"], y=dias_trab["Persona"], mode="markers",
             marker=dict(color="rgba(44,62,80,0.45)", size=7, symbol="line-ns-open"),
             name="día con registro", hoverinfo="skip",
         ))
