@@ -9,6 +9,7 @@ El almacenamiento se elige automáticamente (ver data_backend.py):
 """
 
 import io
+import math
 from datetime import datetime
 
 import pandas as pd
@@ -3183,6 +3184,125 @@ def _calc_tab_rendimiento(catalogo: list):
     )
 
 
+def _calc_tab_apto(cat_pv: list, cat_ph: list):
+    """Simulador de un apto completo (sandbox, no guarda): varios muros
+    (combinados o de un solo tipo) → bloques por tipo en TRES niveles
+    (teórico, con Factor de Modulación, y con el desperdicio FINAL compuesto).
+
+    El punto clave: el Factor de Modulación y el % de desperdicio se MULTIPLICAN
+    (no se suman). El desperdicio final = factor × (1 + desp) − 1; p.ej. 1.05 × 1.07
+    = 1.1235 → 12.35 %, no 7 %.
+    """
+    st.caption(
+        "Pon **un muro por fila** (combinado o de un solo tipo) y mira cuántos "
+        "bloques de cada tipo necesita el apto en **tres niveles**: teórico, con "
+        "**Factor de Modulación** y con el **desperdicio final**. **No guarda nada.**"
+    )
+    nombres_pv = [b["nombre"] for b in cat_pv]
+    nombres_ph = [b["nombre"] for b in cat_ph]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        junta = st.selectbox("Junta de pega (cm)", JUNTAS_CM,
+                             index=JUNTAS_CM.index(1.5), key="apto_junta")
+    with c2:
+        factor = st.number_input(
+            "Factor de Modulación", min_value=1.0, max_value=1.5,
+            value=max(round(_factor_ajuste(), 2), 1.05), step=0.01, format="%.2f",
+            key="apto_factor",
+            help="Sube el teórico por cortes/medios bloques (ej. 1.05 = +5 %).")
+    with c3:
+        desp = st.number_input(
+            "% Desperdicio", min_value=0.0, value=round(_umbral_pct(), 1),
+            step=0.5, format="%.1f", key="apto_desp",
+            help="Roturas/mermas. Se aplica DESPUÉS del factor (se multiplican).")
+
+    # Desperdicio final compuesto: factor × (1 + desp) − 1 (NO es la suma).
+    final_factor = factor * (1 + desp / 100.0)
+    desp_final_pct = (final_factor - 1) * 100.0
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Factor de Modulación", f"+{(factor - 1) * 100:.1f} %")
+    mc2.metric("Desperdicio", f"+{desp:.1f} %")
+    mc3.metric("Desperdicio FINAL", f"+{desp_final_pct:.2f} %",
+               help="Factor × (1 + desperdicio) − 1. Se multiplican, no se suman.")
+    st.caption(
+        f"Cálculo del final: **{factor:g} × {1 + desp / 100:.2f} = {final_factor:.4f}** "
+        f"→ pides **{desp_final_pct:.2f} %** más que el teórico (no {desp:g} %)."
+    )
+
+    muros_init = pd.DataFrame([{
+        "Largo_m": 0.0, "Alto_m": 2.40, "Num_dovelas": 0,
+        "Uso": USO_COMBINADO, "Bloque_PV": "", "Bloque_PH": "",
+    }])
+    col_cfg = {
+        "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
+        "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
+        "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
+        "Uso": st.column_config.SelectboxColumn("Uso del muro", options=USOS_MURO, required=True, width="medium"),
+        "Bloque_PV": st.column_config.SelectboxColumn("Bloque P.V. (dovelas)", options=[""] + nombres_pv, width="medium"),
+        "Bloque_PH": st.column_config.SelectboxColumn("Bloque P.H. (relleno)", options=[""] + nombres_ph, width="medium"),
+    }
+    editado = st.data_editor(muros_init, num_rows="dynamic", key="apto_editor",
+                             width="stretch", column_config=col_cfg)
+
+    # Acumula el teórico geométrico por NOMBRE de tipo sobre todos los muros.
+    por_tipo: dict[str, float] = {}
+    n_muros = 0
+    area_total = 0.0
+    for r in editado.itertuples():
+        if not (pd.notna(r.Largo_m) and pd.notna(r.Alto_m)
+                and r.Largo_m > 0 and r.Alto_m > 0):
+            continue
+        uso_disp = getattr(r, "Uso", USO_COMBINADO)
+        if not isinstance(uso_disp, str) or uso_disp not in USOS_MURO:
+            uso_disp = USO_COMBINADO
+        nec_pv = uso_disp in (USO_COMBINADO, USO_VERTICAL)
+        nec_ph = uso_disp in (USO_COMBINADO, USO_HORIZONTAL)
+        t_pv = (getattr(r, "Bloque_PV", "") or "").strip() if nec_pv else ""
+        t_ph = (getattr(r, "Bloque_PH", "") or "").strip() if nec_ph else ""
+        b_pv = _bloque_con_junta(_bloque_por_nombre(t_pv), junta) if t_pv else None
+        b_ph = _bloque_con_junta(_bloque_por_nombre(t_ph), junta) if t_ph else None
+        if not (b_pv or b_ph):
+            continue
+        teo = bloques_teoricos_muro(
+            float(r.Largo_m), float(r.Alto_m),
+            int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0,
+            b_pv, b_ph, uso=_USO_A_MODO.get(uso_disp, "Auto"))
+        if t_pv:
+            por_tipo[t_pv] = por_tipo.get(t_pv, 0.0) + teo["pv"]
+        if t_ph:
+            por_tipo[t_ph] = por_tipo.get(t_ph, 0.0) + teo["ph"]
+        n_muros += 1
+        area_total += float(r.Largo_m) * float(r.Alto_m)
+
+    if not por_tipo:
+        st.info("Agrega muros con **Largo**, **Alto** y su(s) **bloque(s)** para ver el cálculo.")
+        return
+
+    filas = ""
+    tt = tf = td = 0.0
+    for t, teo in sorted(por_tipo.items(), key=lambda kv: -kv[1]):
+        con_f = teo * factor
+        con_d = teo * final_factor
+        tt += teo
+        tf += con_f
+        td += con_d
+        filas += (f"| {t} | {teo:,.0f} | {con_f:,.0f} | {math.ceil(con_d):,d} |\n")
+
+    st.markdown(
+        f"**Bloques por tipo — apto de {n_muros} muro(s), {area_total:.2f} m²:**\n\n"
+        f"| Tipo de bloque | Teórico | Con factor (×{factor:g}) | Final (+{desp_final_pct:.1f} %) |\n"
+        "|---|---|---|---|\n"
+        f"{filas}"
+        f"| **Total** | **{tt:,.0f}** | **{tf:,.0f}** | **{math.ceil(td):,d}** |\n"
+    )
+    st.caption(
+        f"El **Final** (lo que pides) ya trae el desperdicio compuesto: teórico × "
+        f"{factor:g} × (1 + {desp:g} %). Son **{math.ceil(td) - round(tt):,d} bloques "
+        f"de más** que el teórico (**+{desp_final_pct:.1f} %**)."
+    )
+
+
 def pagina_calculadora():
     st.header("🧮 Calculadora de mampostería")
     cat_pv = _bloques_clase("PV")
@@ -3190,9 +3310,12 @@ def pagina_calculadora():
     if not (cat_pv or cat_ph):
         st.info("No hay catálogo de bloques cargado; configúralo en el panel admin.")
         return
-    tab1, tab2 = st.tabs(["🧱 Calculadora de muro", "📐 Rendimiento"])
+    tab1, tab_apto, tab2 = st.tabs(
+        ["🧱 Calculadora de muro", "🏠 Simular apto", "📐 Rendimiento"])
     with tab1:
         _calc_tab_muro(cat_pv, cat_ph)
+    with tab_apto:
+        _calc_tab_apto(cat_pv, cat_ph)
     with tab2:
         _calc_tab_rendimiento(_catalogo())
 
