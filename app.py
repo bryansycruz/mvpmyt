@@ -3236,7 +3236,7 @@ def _apto_pdf(params: dict, df_tipo: pd.DataFrame, df_detalle: pd.DataFrame):
     pdf.set_font("Helvetica", "B", 14)
     pdf.cell(0, 9, _t("Simulación de apto — Mampostería MyT")); pdf.ln(9)
     pdf.set_font("Helvetica", "", 9)
-    pdf.cell(0, 6, _t(f"Generado: {datetime.now():%Y-%m-%d %H:%M}  ·  documento de simulación (no es un pedido en firme)")); pdf.ln(8)
+    pdf.cell(0, 6, _t(f"Generado: {datetime.now():%Y-%m-%d %H:%M}  ·  documento de simulación")); pdf.ln(8)
 
     # Parámetros
     pdf.set_font("Helvetica", "B", 10)
@@ -3257,11 +3257,11 @@ def _apto_pdf(params: dict, df_tipo: pd.DataFrame, df_detalle: pd.DataFrame):
         _fila(pdf, [row[c] for c in df_tipo.columns], anchos_t)
     pdf.ln(4)
 
-    # Detalle por muro
+    # Relación por muro (cuánto P.V. vs P.H. lleva cada muro)
     if not df_detalle.empty:
         pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 7, _t("Detalle por muro")); pdf.ln(7)
-        anchos_d = [12, 20, 20, 28, 45, 45, 18, 22, 24, 20]
+        pdf.cell(0, 7, _t("Relación por muro")); pdf.ln(7)
+        anchos_d = [14, 18, 26, 40, 16, 18, 40, 16, 18, 18]
         pdf.set_font("Helvetica", "B", 8)
         _fila(pdf, list(df_detalle.columns), anchos_d, h=6)
         pdf.set_font("Helvetica", "", 8)
@@ -3358,14 +3358,18 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
             por_tipo[t_pv] = por_tipo.get(t_pv, 0.0) + teo["pv"]
         if t_ph:
             por_tipo[t_ph] = por_tipo.get(t_ph, 0.0) + teo["ph"]
-        area_total += float(r.Largo_m) * float(r.Alto_m)
-        teo_muro = teo["pv"] + teo["ph"]
+        area_m = float(r.Largo_m) * float(r.Alto_m)
+        area_total += area_m
+        pv_b, ph_b = teo["pv"], teo["ph"]
+        tot_b = pv_b + ph_b
         detalle.append({
-            "Muro": len(detalle) + 1, "Largo (m)": float(r.Largo_m),
-            "Alto (m)": float(r.Alto_m), "Uso": uso_disp.split(" (")[0],
-            "Bloque P.V.": t_pv or "—", "Bloque P.H.": t_ph or "—", "# Dovelas": ndov,
-            "Teórico": round(teo_muro), "Con factor": round(teo_muro * factor),
-            "Final": math.ceil(teo_muro * final_factor),
+            "Muro": len(detalle) + 1, "m²": round(area_m, 2),
+            "Uso": uso_disp.split(" (")[0],
+            "Bloque P.V.": t_pv or "—", "P.V.": round(pv_b),
+            "% P.V.": f"{pv_b / tot_b * 100:.0f}%" if tot_b else "—",
+            "Bloque P.H.": t_ph or "—", "P.H.": round(ph_b),
+            "% P.H.": f"{ph_b / tot_b * 100:.0f}%" if tot_b else "—",
+            "Total": round(tot_b),
         })
     n_muros = len(detalle)
 
@@ -3399,6 +3403,11 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
         f"de más** que el teórico (**+{desp_final_pct:.1f} %**)."
     )
 
+    # Relación por muro: cuánto P.V. vs P.H. lleva CADA muro (Total = 100 %).
+    df_detalle = pd.DataFrame(detalle)
+    st.markdown("**Relación por muro** (de cada muro: cuánto es P.V. y cuánto P.H.):")
+    st.dataframe(df_detalle, hide_index=True, width="stretch")
+
     # ── Descargas (Excel / PDF). Sandbox: se generan en memoria, NO tocan Supabase.
     params = {
         "Muros": n_muros, "Área total (m²)": round(area_total, 2),
@@ -3408,8 +3417,7 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
     df_tipo = pd.DataFrame(filas_tipo + [{
         "Tipo de bloque": "TOTAL", "Teórico": round(tt),
         "Con factor": round(tf), "Final": math.ceil(td)}])
-    df_detalle = pd.DataFrame(detalle)
-    st.caption("📥 Descarga el resultado (no afecta la base de datos):")
+    st.caption("📥 Descarga el resultado:")
     dc1, dc2 = st.columns(2)
     with dc1:
         st.download_button(
