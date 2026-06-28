@@ -933,7 +933,7 @@ def pagina_graficas(df: pd.DataFrame):
     fechas_validas = df["Fecha"].dropna()
     if not fechas_validas.empty:
         fmin, fmax = fechas_validas.min().date(), fechas_validas.max().date()
-        st.caption("📅 **Filtrar por fechas** — afecta todos los indicadores y gráficos de abajo.")
+        st.caption("📅 **Filtrar por fechas**")
         cfa, cfb = st.columns(2)
         with cfa:
             desde = st.date_input("Desde", value=fmin, min_value=fmin, max_value=fmax,
