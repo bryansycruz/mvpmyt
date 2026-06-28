@@ -3324,7 +3324,9 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
     col_cfg = {
         "Largo_m": st.column_config.NumberColumn("Largo (m)", min_value=0.0, step=0.01, format="%.2f"),
         "Alto_m": st.column_config.NumberColumn("Alto muro (m)", min_value=0.0, step=0.01, format="%.2f"),
-        "Num_dovelas": st.column_config.NumberColumn("# Dovelas", min_value=0, step=1, format="%d"),
+        "Num_dovelas": st.column_config.NumberColumn(
+            "# Dovelas + redes", min_value=0, step=1, format="%d",
+            help="Columnas P.V. de piso a techo: dovelas y redes juntas (cuentan igual)."),
         "Uso": st.column_config.SelectboxColumn("Uso del muro", options=USOS_MURO, required=True, width="medium"),
         "Bloque_PV": st.column_config.SelectboxColumn("Bloque P.V. (dovelas)", options=[""] + nombres_pv, width="medium"),
         "Bloque_PH": st.column_config.SelectboxColumn("Bloque P.H. (relleno)", options=[""] + nombres_ph, width="medium"),
