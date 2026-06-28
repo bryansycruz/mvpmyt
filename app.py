@@ -3184,6 +3184,77 @@ def _calc_tab_rendimiento(catalogo: list):
     )
 
 
+def _apto_excel(params: dict, df_tipo: pd.DataFrame, df_detalle: pd.DataFrame) -> bytes:
+    """Excel del simulador de apto: Parámetros + Bloques por tipo + Detalle por muro.
+    Se genera en memoria (openpyxl); NO lee ni escribe en Supabase."""
+    df_param = pd.DataFrame({"Parámetro": list(params.keys()),
+                             "Valor": list(params.values())})
+    return excel_libro({
+        "Parametros": df_param,
+        "Por tipo": df_tipo,
+        "Por muro": df_detalle,
+    })
+
+
+def _apto_pdf(params: dict, df_tipo: pd.DataFrame, df_detalle: pd.DataFrame):
+    """PDF del simulador de apto. Devuelve None si falta `fpdf2`. Se genera en
+    memoria; NO toca la base de datos."""
+    try:
+        from fpdf import FPDF
+    except Exception:
+        return None
+
+    def _t(x) -> str:  # fuentes core de fpdf = latin-1: limpia lo que no entra
+        s = (str(x).replace("²", "2").replace("×", "x").replace("→", "->")
+             .replace("≤", "<=").replace("—", "-").replace("–", "-").replace("•", "-"))
+        return s.encode("latin-1", "replace").decode("latin-1")  # cualquier otro → "?"
+
+    def _fila(pdf, valores, anchos, h=6, border=1, align="C"):
+        for v, w in zip(valores, anchos):
+            pdf.cell(w, h, _t(v), border=border, align=align)
+        pdf.ln(h)
+
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 9, _t("Simulación de apto — Mampostería MyT")); pdf.ln(9)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(0, 6, _t(f"Generado: {datetime.now():%Y-%m-%d %H:%M}  ·  documento de simulación (no es un pedido en firme)")); pdf.ln(8)
+
+    # Parámetros
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, _t("Parámetros")); pdf.ln(7)
+    pdf.set_font("Helvetica", "", 9)
+    for k, v in params.items():
+        _fila(pdf, [k, v], [80, 50], align="L")
+    pdf.ln(4)
+
+    # Bloques por tipo
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, _t("Bloques por tipo")); pdf.ln(7)
+    anchos_t = [90, 35, 40, 35]
+    pdf.set_font("Helvetica", "B", 9)
+    _fila(pdf, list(df_tipo.columns), anchos_t)
+    pdf.set_font("Helvetica", "", 9)
+    for _, row in df_tipo.iterrows():
+        _fila(pdf, [row[c] for c in df_tipo.columns], anchos_t)
+    pdf.ln(4)
+
+    # Detalle por muro
+    if not df_detalle.empty:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 7, _t("Detalle por muro")); pdf.ln(7)
+        anchos_d = [12, 20, 20, 28, 45, 45, 18, 22, 24, 20]
+        pdf.set_font("Helvetica", "B", 8)
+        _fila(pdf, list(df_detalle.columns), anchos_d, h=6)
+        pdf.set_font("Helvetica", "", 8)
+        for _, row in df_detalle.iterrows():
+            _fila(pdf, [row[c] for c in df_detalle.columns], anchos_d, h=6)
+
+    return bytes(pdf.output())
+
+
 def _calc_tab_apto(cat_pv: list, cat_ph: list):
     """Simulador de un apto completo (sandbox, no guarda): varios muros
     (combinados o de un solo tipo) → bloques por tipo en TRES niveles
@@ -3245,9 +3316,9 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
     editado = st.data_editor(muros_init, num_rows="dynamic", key="apto_editor",
                              width="stretch", column_config=col_cfg)
 
-    # Acumula el teórico geométrico por NOMBRE de tipo sobre todos los muros.
+    # Acumula el teórico geométrico por NOMBRE de tipo y guarda el detalle por muro.
     por_tipo: dict[str, float] = {}
-    n_muros = 0
+    detalle: list[dict] = []
     area_total = 0.0
     for r in editado.itertuples():
         if not (pd.notna(r.Largo_m) and pd.notna(r.Alto_m)
@@ -3264,16 +3335,23 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
         b_ph = _bloque_con_junta(_bloque_por_nombre(t_ph), junta) if t_ph else None
         if not (b_pv or b_ph):
             continue
-        teo = bloques_teoricos_muro(
-            float(r.Largo_m), float(r.Alto_m),
-            int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0,
-            b_pv, b_ph, uso=_USO_A_MODO.get(uso_disp, "Auto"))
+        ndov = int(r.Num_dovelas) if pd.notna(r.Num_dovelas) else 0
+        teo = bloques_teoricos_muro(float(r.Largo_m), float(r.Alto_m), ndov,
+                                    b_pv, b_ph, uso=_USO_A_MODO.get(uso_disp, "Auto"))
         if t_pv:
             por_tipo[t_pv] = por_tipo.get(t_pv, 0.0) + teo["pv"]
         if t_ph:
             por_tipo[t_ph] = por_tipo.get(t_ph, 0.0) + teo["ph"]
-        n_muros += 1
         area_total += float(r.Largo_m) * float(r.Alto_m)
+        teo_muro = teo["pv"] + teo["ph"]
+        detalle.append({
+            "Muro": len(detalle) + 1, "Largo (m)": float(r.Largo_m),
+            "Alto (m)": float(r.Alto_m), "Uso": uso_disp.split(" (")[0],
+            "Bloque P.V.": t_pv or "—", "Bloque P.H.": t_ph or "—", "# Dovelas": ndov,
+            "Teórico": round(teo_muro), "Con factor": round(teo_muro * factor),
+            "Final": math.ceil(teo_muro * final_factor),
+        })
+    n_muros = len(detalle)
 
     if not por_tipo:
         st.info("Agrega muros con **Largo**, **Alto** y su(s) **bloque(s)** para ver el cálculo.")
@@ -3281,6 +3359,7 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
 
     filas = ""
     tt = tf = td = 0.0
+    filas_tipo = []   # para la exportación
     for t, teo in sorted(por_tipo.items(), key=lambda kv: -kv[1]):
         con_f = teo * factor
         con_d = teo * final_factor
@@ -3288,6 +3367,8 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
         tf += con_f
         td += con_d
         filas += (f"| {t} | {teo:,.0f} | {con_f:,.0f} | {math.ceil(con_d):,d} |\n")
+        filas_tipo.append({"Tipo de bloque": t, "Teórico": round(teo),
+                           "Con factor": round(con_f), "Final": math.ceil(con_d)})
 
     st.markdown(
         f"**Bloques por tipo — apto de {n_muros} muro(s), {area_total:.2f} m²:**\n\n"
@@ -3301,6 +3382,32 @@ def _calc_tab_apto(cat_pv: list, cat_ph: list):
         f"{factor:g} × (1 + {desp:g} %). Son **{math.ceil(td) - round(tt):,d} bloques "
         f"de más** que el teórico (**+{desp_final_pct:.1f} %**)."
     )
+
+    # ── Descargas (Excel / PDF). Sandbox: se generan en memoria, NO tocan Supabase.
+    params = {
+        "Muros": n_muros, "Área total (m²)": round(area_total, 2),
+        "Junta (cm)": junta, "Factor de Modulación": factor,
+        "% Desperdicio": desp, "Desperdicio final (%)": round(desp_final_pct, 2),
+    }
+    df_tipo = pd.DataFrame(filas_tipo + [{
+        "Tipo de bloque": "TOTAL", "Teórico": round(tt),
+        "Con factor": round(tf), "Final": math.ceil(td)}])
+    df_detalle = pd.DataFrame(detalle)
+    st.caption("📥 Descarga el resultado (no afecta la base de datos):")
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        st.download_button(
+            "⬇️ Excel", data=_apto_excel(params, df_tipo, df_detalle),
+            file_name="simulacion_apto.xlsx", width="stretch",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with dc2:
+        pdf_bytes = _apto_pdf(params, df_tipo, df_detalle)
+        if pdf_bytes is not None:
+            st.download_button("⬇️ PDF", data=pdf_bytes, file_name="simulacion_apto.pdf",
+                               mime="application/pdf", width="stretch")
+        else:
+            st.button("⬇️ PDF", disabled=True, width="stretch",
+                      help="Falta la librería fpdf2 en el servidor.")
 
 
 def pagina_calculadora():
