@@ -927,6 +927,32 @@ def pagina_graficas(df: pd.DataFrame):
         st.info("Aún no hay datos para graficar.")
         return
 
+    # ── Filtro por rango de fechas: afecta los KPIs y TODOS los gráficos ──
+    # (Sirve para responder "¿qué pasó entre tal y tal fecha?"). Por defecto
+    # toma el rango completo de los datos = muestra todo.
+    fechas_validas = df["Fecha"].dropna()
+    if not fechas_validas.empty:
+        fmin, fmax = fechas_validas.min().date(), fechas_validas.max().date()
+        st.caption("📅 **Filtrar por fechas** — afecta todos los indicadores y gráficos de abajo.")
+        cfa, cfb = st.columns(2)
+        with cfa:
+            desde = st.date_input("Desde", value=fmin, min_value=fmin, max_value=fmax,
+                                  key="control_desde", format="YYYY-MM-DD")
+        with cfb:
+            hasta = st.date_input("Hasta", value=fmax, min_value=fmin, max_value=fmax,
+                                  key="control_hasta", format="YYYY-MM-DD")
+        if desde > hasta:               # por si invierten el orden
+            desde, hasta = hasta, desde
+        m_fecha = df["Fecha"].dt.date
+        df = df[(m_fecha >= desde) & (m_fecha <= hasta)]
+        rango_txt = "todo el periodo" if (desde, hasta) == (fmin, fmax) else f"{desde} → {hasta}"
+        st.caption(f"Mostrando **{len(df)}** registro(s) · {rango_txt}.")
+        if df.empty:
+            st.info("No hay registros en ese rango de fechas. Amplía el rango.")
+            return
+
+    st.divider()
+
     # Tarjetas KPI
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Total M² ejecutados", f"{df['M2_ejecutados'].sum():,.1f} m²")
