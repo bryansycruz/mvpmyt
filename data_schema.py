@@ -140,10 +140,12 @@ def normalizar_entradas(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────
 # Ledger APARTE del material: las estibas devueltas NO están ligadas al pedido
 # ni a los ladrillos, no afectan el stock de bloque. Una fila por devolución;
-# `Cantidad` es el número de pallets que se regresan. Se guarda en su propia
-# tabla `almacen_estibas_dev` (Supabase) / hoja `Estibas_dev` (Excel/SharePoint).
+# `Cantidad` es el número de pallets que se regresan. `Tipo_bloque` indica de qué
+# bloque era ese pallet (Catalán moreno, etc.); es opcional (filas antiguas o
+# pallets genéricos quedan vacíos). Se guarda en su propia tabla
+# `almacen_estibas_dev` (Supabase) / hoja `Estibas_dev` (Excel/SharePoint).
 COLUMNAS_ESTIBAS = [
-    "Fecha", "Cantidad", "Proveedor", "No_remision",
+    "Fecha", "Cantidad", "Tipo_bloque", "Proveedor", "No_remision",
     "Observaciones", "Timestamp_registro",
 ]
 

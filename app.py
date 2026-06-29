@@ -1935,12 +1935,17 @@ def _kardex(df_ent: pd.DataFrame, df_sal: pd.DataFrame) -> pd.DataFrame:
     return k.drop(columns=["_signo"])
 
 
-def _form_estibas_dev(df_est: pd.DataFrame) -> None:
+_TIPO_SIN_ESPECIFICAR = "(Sin especificar)"
+
+
+def _form_estibas_dev(df_est: pd.DataFrame, nombres_bloques: list) -> None:
     """Formulario de ESTIBAS DEVUELTAS (pallets de madera regresados al proveedor).
 
     Ledger APARTE del material: las estibas devueltas no están ligadas al pedido
-    ni a los ladrillos y NO afectan el stock de bloque. Solo control de pallets."""
+    ni a los ladrillos y NO afectan el stock de bloque. Solo control de pallets.
+    `Tipo_bloque` es opcional: indica de qué bloque era el pallet (Catalán moreno…)."""
     proveedores = opciones_unicas(df_est, "Proveedor")
+    opciones_tipo = [_TIPO_SIN_ESPECIFICAR] + list(nombres_bloques)
     with st.form("form_estibas", clear_on_submit=True):
         d1, d2, d3 = st.columns(3)
         with d1:
@@ -1950,16 +1955,21 @@ def _form_estibas_dev(df_est: pd.DataFrame) -> None:
             cant_d = st.number_input("Estibas devueltas (pallets) *", min_value=0.0,
                                      step=1.0, format="%.0f", key="est_cant")
         with d3:
+            tipo_d = st.selectbox(
+                "Tipo de bloque", opciones_tipo, key="est_tipo",
+                help="De qué bloque era el pallet (Catalán moreno, etc.). "
+                     "Opcional: déjalo en «(Sin especificar)» si no aplica.",
+            )
+        d4, d5 = st.columns(2)
+        with d4:
             prov_d = st.text_input(
                 "Proveedor", key="est_prov", placeholder="Ej: LAD SAN C",
                 help="A quién se le regresan los pallets. Usados: "
                      + (", ".join(proveedores) if proveedores else "—"),
             )
-        d4, d5 = st.columns(2)
-        with d4:
-            remision_d = st.text_input("# Remisión (opcional)", key="est_remision")
         with d5:
-            obs_d = st.text_input("Observaciones", key="est_obs")
+            remision_d = st.text_input("# Remisión (opcional)", key="est_remision")
+        obs_d = st.text_input("Observaciones", key="est_obs")
         enviar_d = st.form_submit_button("💾 Guardar devolución", type="primary")
 
     if not enviar_d:
@@ -1968,8 +1978,10 @@ def _form_estibas_dev(df_est: pd.DataFrame) -> None:
         st.error("La **cantidad de estibas devueltas** debe ser mayor que 0.")
         return
 
+    tipo_guardar = "" if tipo_d == _TIPO_SIN_ESPECIFICAR else tipo_d
+
     # Guardia anti doble clic.
-    firma_d = repr((str(fecha_d), float(cant_d), prov_d.strip(),
+    firma_d = repr((str(fecha_d), float(cant_d), tipo_guardar, prov_d.strip(),
                     remision_d.strip(), obs_d.strip()))
     ult_d = st.session_state.get("ultima_estiba_firma")
     if ult_d and ult_d[0] == firma_d and datetime.now().timestamp() - ult_d[1] < 120:
@@ -1980,6 +1992,7 @@ def _form_estibas_dev(df_est: pd.DataFrame) -> None:
     fila = pd.DataFrame([{
         "Fecha": pd.to_datetime(fecha_d),
         "Cantidad": float(cant_d),
+        "Tipo_bloque": tipo_guardar,
         "Proveedor": prov_d.strip(),
         "No_remision": remision_d.strip(),
         "Observaciones": obs_d.strip(),
@@ -1995,14 +2008,15 @@ def _form_estibas_dev(df_est: pd.DataFrame) -> None:
     st.session_state["ultima_estiba_firma"] = (firma_d, datetime.now().timestamp())
     st.session_state["flash_estibas"] = (
         f"Estibas devueltas guardadas · {cant_d:,.0f} pallet(s)"
+        f"{f' · {tipo_guardar}' if tipo_guardar else ''}"
         f"{f' · {prov_d.strip()}' if prov_d.strip() else ''}."
     )
-    for k in ("est_fecha", "est_cant", "est_prov", "est_remision", "est_obs"):
+    for k in ("est_fecha", "est_cant", "est_tipo", "est_prov", "est_remision", "est_obs"):
         st.session_state.pop(k, None)
     st.rerun()
 
 
-def _seccion_estibas_dev(df_est: pd.DataFrame) -> None:
+def _seccion_estibas_dev(df_est: pd.DataFrame, nombres_bloques: list) -> None:
     """Sección independiente del stock: registrar y ver estibas (pallets) devueltas."""
     st.divider()
     st.subheader("♻️ Estibas devueltas")
@@ -2013,7 +2027,7 @@ def _seccion_estibas_dev(df_est: pd.DataFrame) -> None:
     )
     if "flash_estibas" in st.session_state:
         st.success(st.session_state.pop("flash_estibas"))
-    _form_estibas_dev(df_est)
+    _form_estibas_dev(df_est, nombres_bloques)
 
     if df_est is None or df_est.empty:
         return
@@ -2023,9 +2037,12 @@ def _seccion_estibas_dev(df_est: pd.DataFrame) -> None:
     st.metric("Total de estibas devueltas", f"{total:,.0f} pallet(s)")
     vista = e.sort_values("Fecha", ascending=False).head(40).copy()
     vista["Fecha"] = pd.to_datetime(vista["Fecha"], errors="coerce").dt.strftime("%Y-%m-%d")
-    cols = ["Fecha", "Cantidad", "Proveedor", "No_remision", "Observaciones"]
+    if "Tipo_bloque" in vista.columns:   # filas antiguas / pallets genéricos = "—"
+        vista["Tipo_bloque"] = vista["Tipo_bloque"].replace("", pd.NA)
+    cols = ["Fecha", "Cantidad", "Tipo_bloque", "Proveedor", "No_remision", "Observaciones"]
     st.dataframe(
-        vista[cols].rename(columns={"Cantidad": "Pallets", "No_remision": "Remisión"})
+        vista[cols].rename(columns={"Cantidad": "Pallets", "Tipo_bloque": "Tipo",
+                                    "No_remision": "Remisión"})
         .style.format({"Pallets": "{:,.0f}"}, na_rep="—"),
         width="stretch", hide_index=True,
     )
@@ -2133,7 +2150,7 @@ def _tab_movimientos(df: pd.DataFrame, df_ent: pd.DataFrame, df_sal: pd.DataFram
         )
 
     # ── Estibas devueltas (control de pallets, aparte del stock) ───
-    _seccion_estibas_dev(df_est)
+    _seccion_estibas_dev(df_est, nombres_bloques)
 
 
 def _tab_conciliacion(df: pd.DataFrame, df_sal: pd.DataFrame):

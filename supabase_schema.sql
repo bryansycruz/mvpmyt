@@ -154,13 +154,15 @@ create index if not exists idx_entradas_tipo  on almacen_entradas ("Tipo_bloque"
 
 -- Estibas devueltas (pallets de madera VACÍOS regresados al proveedor). Ledger
 -- APARTE del material: NO está unido al pedido ni a los ladrillos y NO afecta el
--- stock de bloque. `Cantidad` = nº de pallets devueltos. El borrado de un
+-- stock de bloque. `Cantidad` = nº de pallets devueltos. `Tipo_bloque` (opcional)
+-- indica de qué bloque era el pallet (Catalán moreno, etc.). El borrado de un
 -- movimiento mal digitado se hace por `id` y funciona con la clave service_role
 -- (omite RLS); con la clave anon haría falta una policy DELETE.
 create table if not exists almacen_estibas_dev (
     id                      bigint generated always as identity primary key,
     "Fecha"                 date not null,
     "Cantidad"              double precision not null check ("Cantidad" > 0),
+    "Tipo_bloque"           text,
     "Proveedor"             text,
     "No_remision"           text,
     "Observaciones"         text,
@@ -243,6 +245,13 @@ alter table almacen_salidas
     alter column "Tipo_bloque" set not null,
     alter column "Cantidad"    set not null,
     add constraint chk_sal_cantidad_positiva check ("Cantidad" > 0);
+
+-- Tipo de bloque en estibas devueltas (columna nueva, OPCIONAL): de qué bloque
+-- era el pallet (Catalán moreno, etc.). Correr en bases ya existentes; en
+-- instalaciones nuevas ya viene en el CREATE de arriba. La app arma el SELECT
+-- desde COLUMNAS_ESTIBAS, así que SIN este ALTER falla la LECTURA de estibas, no
+-- solo el insert.
+alter table almacen_estibas_dev add column if not exists "Tipo_bloque" text;
 
 
 -- ─────────────────────────────────────────────────────────────
