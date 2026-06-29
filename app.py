@@ -2092,8 +2092,7 @@ def _tab_movimientos(df: pd.DataFrame, df_ent: pd.DataFrame, df_sal: pd.DataFram
         st.subheader("🎯 Avance del pedido (recibido vs techo)")
         st.caption(
             "Suma de **todo lo recibido** por tipo contra el **techo del pedido** de la "
-            "torre (el *TOTAL PEDIDO* que se llevaba en el Excel *Control ladrillo*). El "
-            "techo es un **tope de gasto previsto**, no un objetivo exacto. "
+            "torre. El techo es un **tope de gasto previsto**, no un objetivo exacto. "
             "**% avance = recibido ÷ techo**; 🔴 = ya se pasó del techo."
         )
 
