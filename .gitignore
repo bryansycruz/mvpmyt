@@ -5,6 +5,8 @@ api_key.txt
 
 # Datos de prueba en modo local
 datos_mamposteria_local.xlsx
+Calculadora_desperdicio_bloques.xlsx
+aptos.xlsx
 
 # Datos internos de obra (no se publican en el repo)
 Control ladrillo.xlsx
@@ -12,6 +14,7 @@ Control ladrillo.xlsx
 # Documentación interna de obra (no se publica en el repo)
 README_DESPERDICIO.md
 README_CALCULADORA_EXCEL.md
+CONTEXTO.md
 docs/context.txt
 docs/problem_Adm.txt
 # Generador del Word de cálculos: embebe contexto interno de la obra
@@ -20,8 +23,9 @@ generar_doc_calculos.py
 
 # Cálculos y datos internos de obra (no se publican en el repo)
 Calculadora_desperdicio_bloques.xlsx
-Calculo_desperdicio_bloques_factor_y_umbral.docx
 aptos.xlsx
+# Todos los Word son documentos internos de obra → nunca se versionan
+*.docx
 
 # Configuración local de herramientas
 .claude/

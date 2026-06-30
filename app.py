@@ -953,9 +953,10 @@ def pagina_graficas(df: pd.DataFrame):
 
     st.divider()
 
-    # Tarjetas KPI
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total M² ejecutados", f"{df['M2_ejecutados'].sum():,.1f} m²")
+    # Tarjetas KPI — dos filas: arriba lo global, abajo lo de mamposteros.
+    m2_total = df["M2_ejecutados"].sum()
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total M² ejecutados", f"{m2_total:,.1f} m²")
     prom = consumo_ratio(df)   # Σsacos ÷ Σm² (consistente con la barra KPI global)
     k2.metric(
         "Consumo promedio", f"{prom:.3f}",
@@ -964,7 +965,30 @@ def pagina_graficas(df: pd.DataFrame):
     k2.caption(f"= {prom * _kg():.1f} kg/m²")
     cumplen = int(df["Cumple_meta"].sum())
     k3.metric("Registros que cumplen", f"{cumplen} / {len(df)}")
-    k4.metric("Oficiales distintos", df["Oficial"].nunique())
+
+    k4, k5, k6 = st.columns(3)
+    n_ofic = df["Oficial"].nunique()
+    k4.metric("Oficiales distintos", n_ofic)
+    # Promedio acumulado por mampostero en el periodo (Σ m² ÷ nº oficiales activos).
+    prom_m2 = m2_total / n_ofic if n_ofic else 0.0
+    k5.metric(
+        "Promedio M²/mampostero", f"{prom_m2:,.1f} m²",
+        help="Total de m² ÷ nº de mamposteros activos (oficiales que pegaron en el "
+             "periodo). Es el acumulado del periodo filtrado, no por día.",
+    )
+    # Ritmo diario: promedio de m² que pega un mampostero en un día trabajado.
+    # = Σ m² ÷ Σ días trabajados (cada par oficial+día cuenta como un día-mampostero),
+    # igual que el m²/día del cierre y comparable con la meta de m²/día.
+    df_fo = df.dropna(subset=["Fecha", "Oficial"])
+    dias_mamp = (df_fo.assign(_d=df_fo["Fecha"].dt.date)
+                 .drop_duplicates(["Oficial", "_d"]).shape[0])
+    prom_m2_dia = df_fo["M2_ejecutados"].sum() / dias_mamp if dias_mamp else 0.0
+    k6.metric(
+        "Prom. M²/mampostero-día", f"{prom_m2_dia:,.1f} m²",
+        help="Promedio de m² que pega un mampostero en un día trabajado: total de m² ÷ "
+             "días trabajados (cada día que un oficial pegó cuenta como uno). Es el "
+             "ritmo diario, comparable con la meta de m²/día.",
+    )
 
     st.divider()
 
@@ -973,17 +997,18 @@ def pagina_graficas(df: pd.DataFrame):
 
     oficiales_m2 = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
     sel_m2 = st.multiselect(
-        "Mamposteros a mostrar", oficiales_m2, default=oficiales_m2,
-        key="graf_oficiales_m2",
-        help="Deja solo los mamposteros que quieras comparar (uno o varios).",
+        "Mamposteros a mostrar", oficiales_m2,
+        key="graf_oficiales_m2", placeholder="Todos (elige para comparar)",
+        help="Déjalo vacío para ver a todos; o elige uno o varios para comparar.",
     )
+    ofis_m2 = sel_m2 or oficiales_m2   # vacío = todos
     por_oficial_m2 = (
-        df[df["Oficial"].isin(sel_m2)]
+        df[df["Oficial"].isin(ofis_m2)]
         .groupby("Oficial", as_index=False)["M2_ejecutados"].sum()
         .sort_values("M2_ejecutados", ascending=False)
     )
     if por_oficial_m2.empty:
-        st.info("Selecciona al menos un mampostero para ver la gráfica.")
+        st.info("No hay m² registrados para los mamposteros elegidos.")
     else:
         fig1 = px.bar(
             por_oficial_m2, x="Oficial", y="M2_ejecutados",
@@ -1056,6 +1081,63 @@ def pagina_graficas(df: pd.DataFrame):
         )
         st.plotly_chart(fig3, width="stretch")
 
+    # ── M² ejecutados con filtros EN CASCADA (piso → zona → mampostero) ──
+    # Al elegir el piso, las zonas y los mamposteros se acotan a ese piso, para no
+    # buscar entre todas las zonas de la obra. Multiselect vacío = "todas/todos".
+    st.markdown("**M² ejecutados — filtrar por piso, zona y mampostero**")
+    ff1, ff2, ff3 = st.columns(3)
+
+    # 1) Piso (todas las opciones).
+    pisos_op = opciones_unicas(df, "Piso")
+    with ff1:
+        sel_pisos = st.multiselect("Piso", pisos_op, key="m2f_pisos",
+                                   placeholder="Todos los pisos")
+    df_m2f = df if not sel_pisos else df[df["Piso"].astype(str).str.strip().isin(sel_pisos)]
+
+    # 2) Zona: solo las del/los piso(s) elegido(s). Se sanea la selección previa
+    #    para que no quede una zona que ya no aplica (evita error de Streamlit).
+    zonas_op = opciones_unicas(df_m2f, "Zona")
+    if st.session_state.get("m2f_zonas"):
+        st.session_state["m2f_zonas"] = [z for z in st.session_state["m2f_zonas"] if z in zonas_op]
+    with ff2:
+        sel_zonas = st.multiselect("Zona", zonas_op, key="m2f_zonas",
+                                   placeholder="Todas las zonas")
+    if sel_zonas:
+        df_m2f = df_m2f[df_m2f["Zona"].astype(str).str.strip().isin(sel_zonas)]
+
+    # 3) Mampostero: solo los que pegaron en ese piso/zona.
+    ofis_op = opciones_unicas(df_m2f, "Oficial")
+    if st.session_state.get("m2f_ofis"):
+        st.session_state["m2f_ofis"] = [o for o in st.session_state["m2f_ofis"] if o in ofis_op]
+    with ff3:
+        sel_ofis = st.multiselect("Mampostero", ofis_op, key="m2f_ofis",
+                                  placeholder="Todos")
+    if sel_ofis:
+        df_m2f = df_m2f[df_m2f["Oficial"].astype(str).str.strip().isin(sel_ofis)]
+
+    agrupar = st.radio("Ver por", ["Piso", "Zona", "Mampostero"], horizontal=True,
+                       key="m2f_agrupar")
+    col_dim = {"Piso": "Piso", "Zona": "Zona", "Mampostero": "Oficial"}[agrupar]
+    if df_m2f.empty:
+        st.info("No hay datos con esos filtros. Ajusta zona, piso o mampostero.")
+    else:
+        # fillna("") ANTES de astype(str): con el dtype str nativo, astype(str)
+        # deja el faltante como NaN y groupby lo descartaría (se perderían m²).
+        agg_src = df_m2f.copy()
+        agg_src[col_dim] = agg_src[col_dim].fillna("").astype(str).str.strip()
+        agg_src.loc[agg_src[col_dim] == "", col_dim] = "(sin dato)"
+        agg_m2 = (agg_src.groupby(col_dim, as_index=False)["M2_ejecutados"].sum()
+                  .sort_values("M2_ejecutados", ascending=False))
+        fig_m2f = px.bar(
+            agg_m2, x=col_dim, y="M2_ejecutados", text_auto=".0f",
+            title=f"M² ejecutados por {agrupar.lower()}",
+            color_discrete_sequence=["#16a085"],
+        )
+        fig_m2f.update_layout(xaxis_title="", yaxis_title="M² ejecutados")
+        st.plotly_chart(fig_m2f, width="stretch")
+        st.caption(f"Total filtrado: **{df_m2f['M2_ejecutados'].sum():,.1f} m²** · "
+                   f"{len(df_m2f)} registro(s).")
+
     st.divider()
     # ═══════════ Capítulo: Sacos y mortero ═══════════
     st.subheader("Sacos y mortero")
@@ -1067,16 +1149,17 @@ def pagina_graficas(df: pd.DataFrame):
         # consumo sacos÷m² se dispara) reajusta la escala y deja ver a los demás.
         oficiales_todos = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
         oficiales_sel = st.multiselect(
-            "Mamposteros a mostrar", oficiales_todos, default=oficiales_todos,
-            key="graf_oficiales_consumo",
-            help="Quita de la lista a quien no quieras ver (p. ej. uno que hizo muy "
-                 "poco y no volvió: su consumo se dispara y achica a los demás). "
-                 "La tabla de abajo sigue mostrando a todos.",
+            "Mamposteros a mostrar", oficiales_todos,
+            key="graf_oficiales_consumo", placeholder="Todos (elige para filtrar)",
+            help="Déjalo vacío para ver a todos. Elige a algunos para enfocar "
+                 "(p. ej. quitar a uno que hizo muy poco y no volvió: su consumo se "
+                 "dispara y achica a los demás). La tabla de abajo muestra a todos.",
         )
-        por_oficial_cons = consumo_por(df[df["Oficial"].isin(oficiales_sel)], "Oficial")
+        ofis_cons = oficiales_sel or oficiales_todos   # vacío = todos
+        por_oficial_cons = consumo_por(df[df["Oficial"].isin(ofis_cons)], "Oficial")
         por_oficial_cons = por_oficial_cons.sort_values("Consumo", ascending=False)
         if por_oficial_cons.empty:
-            st.info("Selecciona al menos un mampostero para ver la gráfica.")
+            st.info("No hay consumo registrado para los mamposteros elegidos.")
         else:
             por_oficial_cons["color"] = por_oficial_cons["Consumo"].apply(
                 lambda v: "Supera meta" if v > meta else "Cumple meta"
@@ -1097,17 +1180,18 @@ def pagina_graficas(df: pd.DataFrame):
     with cm2:
         oficiales_sacos = sorted(df["Oficial"].dropna().astype(str).unique().tolist())
         sel_sacos = st.multiselect(
-            "Mamposteros a mostrar", oficiales_sacos, default=oficiales_sacos,
-            key="graf_oficiales_sacos",
-            help="Deja solo los mamposteros que quieras comparar (uno o varios).",
+            "Mamposteros a mostrar", oficiales_sacos,
+            key="graf_oficiales_sacos", placeholder="Todos (elige para comparar)",
+            help="Déjalo vacío para ver a todos; o elige uno o varios para comparar.",
         )
+        ofis_sacos = sel_sacos or oficiales_sacos   # vacío = todos
         sacos_oficial = (
-            df[df["Oficial"].isin(sel_sacos)]
+            df[df["Oficial"].isin(ofis_sacos)]
             .groupby("Oficial", as_index=False)["Num_sacos"].sum()
             .sort_values("Num_sacos", ascending=False)
         )
         if sacos_oficial.empty:
-            st.info("Selecciona al menos un mampostero para ver la gráfica.")
+            st.info("No hay sacos registrados para los mamposteros elegidos.")
         else:
             figs1 = px.bar(
                 sacos_oficial, x="Oficial", y="Num_sacos",
